@@ -10,6 +10,7 @@ import { NavigationProvider, useNavigation } from "./Navigation";
 import { Icon } from "./components/Icons";
 import edecoLogo from "./assets/edeco-logo.svg?raw";
 import Minesweeper from "./components/Minesweeper";
+import UpdateDialog, { type UpdatePhase } from "./components/UpdateDialog";
 
 type Tab = "projects" | "library" | "categories" | "settings" | "help";
 
@@ -41,6 +42,9 @@ function AppContent() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [installing, setInstalling] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>("ready");
+  const [updateError, setUpdateError] = useState("");
   const [theme, setThemeState] = useState<ThemeMode>(loadTheme);
   const setTheme = useCallback((mode: ThemeMode) => {
     applyTheme(mode);
@@ -85,35 +89,41 @@ function AppContent() {
     api.updateCheck().then(setUpdate).catch(() => undefined);
   }, []);
 
-  /** Click on the program version: ask again, then show the result. */
+  /** Click on the program version: ask again and show the result in the update window. */
   async function checkForUpdate() {
+    setUpdateOpen(true);
+    setUpdatePhase("checking");
+    setUpdateError("");
     setChecking(true);
     try {
       const u = await api.updateCheck();
       setUpdate(u);
-      if (u.available) notify(`Update ${u.latest} ist verfügbar.`);
-      else notify(u.message || "Du hast die neueste Version.", Boolean(u.message && !u.latest));
+      setUpdatePhase("ready");
     } catch (e) {
-      notify((e as Error).message, true);
+      setUpdateError((e as Error).message);
+      setUpdatePhase("ready");
     } finally {
       setChecking(false);
     }
   }
 
-  /** Same as «Jetzt aktualisieren» in the settings: confirm, download, check, silent setup, restart. */
+  function showUpdate() {
+    setUpdateError("");
+    setUpdatePhase("ready");
+    setUpdateOpen(true);
+  }
+
+  /** Download, check, silent setup, restart. The window itself is the confirmation. */
   async function installUpdate() {
-    if (!update) return;
-    if (!update.can_install) {
-      notify(update.message || "Das Update läuft nur im installierten Windows-Programm.");
-      return;
-    }
-    if (!window.confirm(`Update ${update.latest} jetzt installieren? Das Programm schliesst sich und startet danach neu.`)) return;
+    if (!update?.can_install) return;
+    setUpdateOpen(true);
+    setUpdatePhase("installing");
     setInstalling(true);
     try {
-      const r = await api.updateInstall();
-      notify(r.message);
+      await api.updateInstall();
     } catch (e) {
-      notify((e as Error).message, true);
+      setUpdateError((e as Error).message);
+      setUpdatePhase("ready");
       setInstalling(false);
     }
   }
@@ -209,8 +219,8 @@ function AppContent() {
                 <button
                   className="chip update"
                   disabled={installing}
-                  onClick={() => installUpdate()}
-                  title={update.can_install ? "Update jetzt installieren" : "Update läuft nur im installierten Programm"}
+                  onClick={showUpdate}
+                  title="Update ansehen"
                 >
                   {installing ? "Update läuft …" : `Update ${update.latest} verfügbar`}
                 </button>
@@ -246,7 +256,9 @@ function AppContent() {
             <SettingsPage
               status={status}
               update={update}
-              onUpdate={setUpdate}
+              onCheckUpdate={checkForUpdate}
+              onShowUpdate={showUpdate}
+              checking={checking}
               notify={notify}
               onChanged={reload}
               theme={theme}
@@ -257,6 +269,16 @@ function AppContent() {
       </div>
       {toast && <div className={`toast ${toast.error ? "error" : ""}`} role={toast.error ? "alert" : "status"}>{toast.text}</div>}
       {mineOpen && <Minesweeper onClose={() => setMineOpen(false)} />}
+      {updateOpen && (
+        <UpdateDialog
+          phase={updatePhase}
+          info={update}
+          error={updateError}
+          onClose={() => setUpdateOpen(false)}
+          onInstall={installUpdate}
+          onRetry={checkForUpdate}
+        />
+      )}
     </div>
   );
 }

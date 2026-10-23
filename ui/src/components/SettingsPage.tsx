@@ -10,14 +10,16 @@ import type { ThemeMode } from "../theme";
 interface Props {
   status: Status;
   update: UpdateInfo | null;
-  onUpdate: (u: UpdateInfo) => void;
+  onCheckUpdate: () => void;
+  onShowUpdate: () => void;
+  checking: boolean;
   notify: (text: string, error?: boolean) => void;
   onChanged: () => void;
   theme: ThemeMode;
   onTheme: (mode: ThemeMode) => void;
 }
 
-export default function SettingsPage({ status, update, onUpdate, notify, onChanged, theme, onTheme }: Props) {
+export default function SettingsPage({ status, update, onCheckUpdate, onShowUpdate, checking, notify, onChanged, theme, onTheme }: Props) {
   const [paths, setPaths] = useState<string[]>(status.settings.dataset_paths);
   const [newPath, setNewPath] = useState("");
   const [company, setCompany] = useState(status.settings.company_folder);
@@ -26,36 +28,6 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
   const [stencilFolder, setStencilFolder] = useState(status.settings.stencil_folder ?? "");
   const [stencilInfo, setStencilInfo] = useState<StencilData | null>(null);
   const [busy, setBusy] = useState(false);
-  const [updating, setUpdating] = useState(false);
-  const [checking, setChecking] = useState(false);
-
-  async function checkUpdate() {
-    setChecking(true);
-    setBusy(true);
-    try {
-      const u = await api.updateCheck();
-      onUpdate(u);
-      if (u.available) notify(`Update ${u.latest} ist verfügbar.`);
-      else notify(u.message || "Du hast die neueste Version.", Boolean(u.message && !u.latest));
-    } catch (e) {
-      notify((e as Error).message, true);
-    } finally {
-      setChecking(false);
-      setBusy(false);
-    }
-  }
-
-  async function installUpdate() {
-    if (!window.confirm("Update jetzt installieren? Das Programm schliesst sich und startet danach neu.")) return;
-    setUpdating(true);
-    try {
-      const r = await api.updateInstall();
-      notify(r.message);
-    } catch (e) {
-      notify((e as Error).message, true);
-      setUpdating(false);
-    }
-  }
 
   useEffect(() => {
     setPaths(status.settings.dataset_paths);
@@ -148,17 +120,11 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
           <h3>Programm-Update</h3>
           <p className="desc">
             Installiert:{" "}
-            <button type="button" className="version-link" onClick={checkUpdate} disabled={checking} title="Nach Updates suchen">
+            <button type="button" className="version-link" onClick={onCheckUpdate} disabled={checking} title="Nach Updates suchen">
               {checking ? "Suche …" : status.version_label}
             </button>.
-            {update?.latest ? ` Neueste Version: ${update.latest}.` : ""}
+            {update?.available ? ` Neu: ${update.latest}.` : ""}
           </p>
-          {update?.available && (
-            <p>
-              <span className="badge manual">neu</span> Version {update.latest} ist verfügbar
-              {update.size ? ` (${Math.round(update.size / 1e6)} MB)` : ""}.
-            </p>
-          )}
           <div className="update-row">
             {status.is_admin && (
               <label className="field">
@@ -169,10 +135,10 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
                 <select
                   className="select"
                   value={status.settings.update_channel ?? "stable"}
-                  disabled={busy || updating}
+                  disabled={busy || checking}
                   onChange={async (e) => {
                     await save({ update_channel: e.target.value as "stable" | "test" }, "Update-Kanal gespeichert");
-                    checkUpdate();
+                    onCheckUpdate();
                   }}
                   aria-label="Update-Kanal"
                 >
@@ -182,14 +148,12 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
               </label>
             )}
             <div className="update-actions">
-              {update && !update.available && update.message && <span className="hint">{update.message}</span>}
-              {update?.available && !update.can_install && <span className="warn-text">{update.message}</span>}
-              <button className="btn" disabled={busy || updating} onClick={checkUpdate}>
-                Nach Updates suchen
+              <button className="btn" disabled={busy || checking} onClick={onCheckUpdate}>
+                {checking ? "Suche …" : "Nach Updates suchen"}
               </button>
-              {update?.available && update.can_install && (
-                <button className="btn primary" disabled={updating} onClick={installUpdate}>
-                  {updating ? "Update läuft …" : "Jetzt aktualisieren"}
+              {update?.available && (
+                <button className="btn primary" onClick={onShowUpdate}>
+                  Update ansehen
                 </button>
               )}
             </div>
@@ -449,7 +413,7 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
           <dl className="kv">
             <dt>Programmversion</dt>
             <dd>
-              <button type="button" className="version-link" onClick={checkUpdate} disabled={checking} title="Nach Updates suchen">
+              <button type="button" className="version-link" onClick={onCheckUpdate} disabled={checking} title="Nach Updates suchen">
                 {checking ? "Suche …" : status.version_label}
               </button>
             </dd>
