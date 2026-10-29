@@ -116,20 +116,29 @@ def title(client, pid):
     return client.get(f"/api/projects/{pid}/legend").json()["legend"]["doc"]["title"]["text"]
 
 
-def test_the_wide_view_button_sits_on_the_settings_row(editor):
+def test_the_view_menu_floats_the_settings_and_opens_the_wide_view(editor):
     page, _field, _client, _ids = editor
-    floating = page.get_by_role("button", name="Einstellungen schwebend")
-    playwright.expect(floating).to_be_visible()
-    page.get_by_role("button", name=re.compile(r"Grossansicht$")).click()
+    page.locator("summary").filter(has_text="Ansicht").click()
+    view = page.get_by_role("group", name="Ansicht", exact=True)
+    playwright.expect(view.get_by_role("button", name="Einstellungen schwebend")).to_be_visible()
+    view.get_by_role("button", name="Als Fenster", exact=True).click()
     close = page.locator("button.btn", has_text="Grossansicht beenden")
     playwright.expect(close).to_be_visible()
-    side_by_side = page.evaluate("""() => {
-        const buttons = [...document.querySelectorAll("button")];
-        const a = buttons.find((el) => el.textContent.includes("Einstellungen schwebend"))?.getBoundingClientRect();
-        const b = buttons.find((el) => el.textContent.includes("Grossansicht beenden"))?.getBoundingClientRect();
-        return Boolean(a && b && Math.abs(a.top - b.top) < 8 && b.left >= a.right - 4 && b.left - a.right < 24);
-    }""")
-    assert side_by_side
+    close.click()
+    playwright.expect(page.locator(".legend-editor.windowed")).not_to_be_visible()
+
+
+def test_the_toolbar_shows_what_this_computer_chose(editor):
+    page, _field, _client, _ids = editor
+    toolbar = page.locator(".legend-toolbar")
+    playwright.expect(toolbar.get_by_role("combobox", name="Rastermass")).to_be_visible()
+    playwright.expect(toolbar.get_by_label("Schriftgrösse in mm")).to_have_count(0)
+    page.locator("summary").filter(has_text="Ansicht").click()
+    page.get_by_role("group", name="Sichtbar in der Leiste").get_by_label("Schrift, Symbole, gleiche Fläche").check()
+    page.keyboard.press("Escape")
+    playwright.expect(toolbar.get_by_label("Schriftgrösse in mm")).to_be_visible()
+    # kept on this computer for the next time
+    assert "sizes" in page.evaluate("() => window.localStorage.getItem('nl.legend.toolbar')")
 
 
 def test_a_symbol_can_take_the_section_colour(editor):

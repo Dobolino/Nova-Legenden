@@ -1042,3 +1042,5 @@ img.sym-icon { object-fit: contain; }
 .legend-toolbar .tool-group .select { max-width: 160px; }
 .legend-workspace { gap: 6px; padding-top: 8px; }
 .legend-workspace-head .btn, .legend-workspace-head .select { min-height: 30px; }
+/* the save state must not change the width of the toolbar (it would wrap and move the sheet) */
+.legend-toolbar > [role="status"] { display: inline-block; min-width: 96px; text-align: right; white-space: nowrap; }

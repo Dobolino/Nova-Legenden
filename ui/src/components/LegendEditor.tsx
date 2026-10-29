@@ -811,14 +811,14 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
 
   const generalBox = general?.kind && doc?.general_on === false ? (
     <p className="info-line">
-      Diese Legende ist ohne Allgemeinteil. Einschalten: «Allgemeinteil zeigen» bei den Legenden-Einstellungen.{" "}
-      <button className="btn small" onClick={() => setExportGeneral(true)}>Allgemeinteil zeigen</button>
+      Ohne Allgemeinteil.{" "}
+      <button className="btn small" onClick={() => setExportGeneral(true)}>Einblenden</button>
     </p>
   ) : general?.error ? (
     <p className="info-line company">
-      Allgemeinteil: {general.error} Erwartet wird eine DXF oder DWG, z. B. «E_Legende.dxf», oder ein Ordner, in dem sie liegt.{" "}
+      <span title={general.error}>Allgemeinteil nicht gefunden.</span>{" "}
       <button className="btn small" onClick={() => window.dispatchEvent(new CustomEvent("nl:open-settings"))}>
-        Servervorlage in den Einstellungen wählen
+        Vorlage wählen
       </button>
     </p>
   ) : null;
