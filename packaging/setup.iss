@@ -73,10 +73,6 @@ const
   BrandTeal = $00927C01;
   Ink = $00393020;
   Muted = $007F7564;
-  Track = $00F8F7F4;
-
-procedure SetWindowTheme(hwnd: HWND; pszSubAppName, pszSubIdList: WideString);
-  external 'SetWindowTheme@uxtheme.dll stdcall';
 
 procedure ApplyBrand;
 begin
@@ -86,9 +82,6 @@ begin
   WizardForm.FilenameLabel.Font.Color := Muted;
   WizardForm.WelcomeLabel1.Font.Color := BrandTeal;
   WizardForm.FinishedHeadingLabel.Font.Color := BrandTeal;
-  SetWindowTheme(WizardForm.ProgressGauge.Handle, '', '');
-  WizardForm.ProgressGauge.ForeColor := BrandTeal;
-  WizardForm.ProgressGauge.BackColor := Track;
 end;
 
 procedure InitializeWizard;
