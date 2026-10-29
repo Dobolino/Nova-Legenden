@@ -672,6 +672,74 @@ def register(app: FastAPI, st, project, evaluator, category_colors) -> None:
         return {"folder": data["folder"], "found": data["found"], "files": data["files"], "errors": data["errors"],
                 "nova": version, "sets": out_sets}
 
+    def stencil_plan_rows(version: str = "") -> list[dict]:
+        from ..categories.stencil_rules import stencil_plan
+
+        data = stencils(nova=version or st.settings.nova_version)
+        cats = st.company.categories()
+        ev = evaluator()
+        by_key = {fam.key: fam for fam in ev.families.values()}
+        manual = st.company.assignments()
+
+        def current(fk: str) -> list[str]:
+            if manual.get(fk):
+                return manual[fk]
+            fam = by_key.get(fk)
+            return ev.family_categories(fam) if fam else []
+
+        return stencil_plan(data["sets"], cats, current)
+
+    @app.get("/api/stencils/categories")
+    def stencil_categories() -> dict:
+        """Suggested section or group for every symbol of your user stencil."""
+        rows = stencil_plan_rows()
+        return {"items": rows, "changes": sum(1 for r in rows if r["change"])}
+
+    @app.get("/api/stencils/categories/export/{file_name}")
+    def stencil_categories_csv(file_name: str = ""):
+        rows = stencil_plan_rows()
+        buf = io.StringIO()
+        w = csv.writer(buf, delimiter=";", lineterminator="\r\n")
+        w.writerow(["Familie", "Registerkarte", "Symbol", "Katalog", "Heute", "Vorschlag", "Vorschlag-ID",
+                    "Grund", "Ändern"])
+        for r in rows:
+            w.writerow([r["family_key"], r["tab"], r["name"], r["item"], r["now_label"], r["suggestion_label"],
+                        r["suggestion"], r["reason"], "ja" if r["change"] else ""])
+        name = "Kategorien aus Benutzerschablone.csv"
+        return Response(buf.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+
+    @app.post("/api/stencils/categories/apply")
+    def stencil_categories_apply() -> dict:
+        """Take over every suggested change into the company file (manual assignments)."""
+        require_admin()
+        done = 0
+        for r in stencil_plan_rows():
+            if r["change"]:
+                st.company.assign(r["family_key"], [r["suggestion"]])
+                done += 1
+        rows = stencil_plan_rows()
+        return {"applied": done, "items": rows, "changes": sum(1 for r in rows if r["change"])}
+
+    @app.post("/api/categories/assignments/import")
+    async def import_assignments(file: UploadFile = File(...)) -> dict:
+        """Assignments from a CSV (e.g. the stencil list edited in Excel): columns
+        «Familie» and «Vorschlag-ID» (or «Kategorie-ID»)."""
+        require_admin()
+        raw = (await file.read()).decode("utf-8-sig", errors="replace")
+        known = {c["id"] for c in st.company.categories()}
+        reader = csv.DictReader(io.StringIO(raw), delimiter=";" if raw.count(";") >= raw.count(",") else ",")
+        done, skipped = 0, 0
+        for row in reader:
+            fk = (row.get("Familie") or "").strip()
+            cid = (row.get("Vorschlag-ID") or row.get("Kategorie-ID") or "").strip()
+            if fk and cid in known:
+                st.company.assign(fk, [cid])
+                done += 1
+            elif fk:
+                skipped += 1
+        return {"applied": done, "skipped": skipped}
+
     @app.get("/api/stencils/macro-preview")
     def macro_preview(path: str, project_id: str = "") -> Response:
         """Nova's preview picture of a macro (.n4d) your stencil uses. Only macros of the stencil."""

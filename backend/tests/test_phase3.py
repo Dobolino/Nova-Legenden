@@ -214,3 +214,34 @@ def test_old_company_database_gets_sections_and_groups_once(tmp_path):
     assert store.assignments()["fam-k"] == ["kommunikation"]           # manual choice stays
     assert auto_categories("130", "Notleuchte eckig", list(cats.values()))[0] == ["notleuchten"]
     assert auto_categories("130", "Deckenleuchte", list(cats.values()))[0] == ["licht"]
+
+
+def test_stencil_tabs_and_names_suggest_sections_and_groups(tmp_path):
+    from nova_legend.categories.stencil_rules import stencil_plan, suggest
+    from nova_legend.categories.store import CompanyStore
+
+    cats = CompanyStore(tmp_path / "f.db").categories()
+    known = {c["id"] for c in cats}
+    assert suggest("Leuchten", "Deckenauslass", known)[0] == "licht"
+    assert suggest("Sicherheitsbeleuchtung", "Notlicht-Zentrale", known)[0] == "notleuchten"
+    assert suggest("Verteilungen / Dosen", "UV UP", known)[0] == "verteiler"
+    assert suggest("Telefon / TV / UKV / MM", "Antenne", known)[0] == "tv"
+    assert suggest("Telefon / TV / UKV / MM", "2xRJ45 UP", known)[0] == "edv"
+    assert suggest("Kraftinstallation", "Ladestation E-Fahrzeuge", known)[0] == "kraft"
+    assert suggest("Kombinationen", "Taster/T13, Gr.1 UP", known)[0] is None      # mixed tab: automatic
+    sets = [{"tabs": [{"name": "Leuchten", "entries": [
+        {"name": "Deckenauslass", "family_key": "f1", "item": "130-10"},
+        {"name": "Deckenleuchte", "family_key": "f2", "item": "130-90"},
+        {"name": "Deckenauslass", "family_key": "f1", "item": "130-10"}]}]}]
+    rows = stencil_plan(sets, cats, lambda fk: {"f1": ["dosen"], "f2": ["licht"]}[fk])
+    assert [(r["family_key"], r["change"]) for r in rows] == [("f1", True), ("f2", False)]
+    assert rows[0]["now_label"] == "Steckdosen und Dosen › Dosen" and rows[0]["suggestion_label"] == "Licht und Leuchten"
+
+
+def test_assignments_come_back_from_the_edited_csv(env):
+    client, _tmp = env
+    csv_text = "Familie;Symbol;Vorschlag-ID\r\nfam-a;Deckenauslass;licht\r\nfam-b;Etwas;gibtsnicht\r\n"
+    r = client.post("/api/categories/assignments/import",
+                    files={"file": ("liste.csv", csv_text.encode("utf-8-sig"), "text/csv")})
+    assert r.json() == {"applied": 1, "skipped": 1}
+    assert client.get("/api/category-family?family_key=fam-a").json()["categories"] == ["licht"]

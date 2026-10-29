@@ -1056,3 +1056,7 @@ img.sym-icon { object-fit: contain; }
 .legend-outline .outline-block { margin-bottom: 0; }
 .legend-outline .outline-block + .outline-block, .legend-outline .outline-item + .outline-block { margin-top: 1px; }
 .legend-outline .fold-btn { width: 16px; font-size: 11px; }
+
+.update-news { border-radius: var(--radius-sm); background: var(--panel-sunken, var(--panel-2)); padding: 10px 12px; max-height: 12em; overflow: auto; }
+.update-news-title { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+.update-news ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.5; }

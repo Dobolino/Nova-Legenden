@@ -52,6 +52,20 @@ export interface Category {
   updated_at?: string;
 }
 
+/** A symbol of the user stencil with the section or group it should have. */
+export interface StencilCategoryRow {
+  family_key: string;
+  tab: string;
+  name: string;
+  item: string;
+  now: string;
+  now_label: string;
+  suggestion: string;
+  suggestion_label: string;
+  reason: string;
+  change: boolean;
+}
+
 export interface Options {
   merge_labels: boolean;
   merge_orientation: boolean;
@@ -696,6 +710,16 @@ export const api = {
   setFamilyCategories: (familyKey: string, categories: string[] | null) =>
     request<{ family_key: string; categories: string[]; source: string }>(
       "PUT", "/api/category-family", { family_key: familyKey, categories }),
+  stencilCategories: () => request<{ items: StencilCategoryRow[]; changes: number }>("GET", "/api/stencils/categories"),
+  applyStencilCategories: () =>
+    request<{ applied: number; items: StencilCategoryRow[]; changes: number }>("POST", "/api/stencils/categories/apply"),
+  importAssignments: async (file: File): Promise<{ applied: number; skipped: number }> => {
+    const form = new FormData();
+    form.append("file", file);
+    const res = await fetch("/api/categories/assignments/import", { method: "POST", body: form });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `Fehler ${res.status}`);
+    return res.json();
+  },
   resetCategories: () => request<{ items: Category[] }>("POST", "/api/categories/reset"),
 };
 
