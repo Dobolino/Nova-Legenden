@@ -365,38 +365,42 @@ def _general_header(prims: list, x: float, y: float, inner: float, ts: float, se
     return y + head_h
 
 
+def _cable(row: dict) -> bool:
+    """A long flat drawing of the general part (a cable with its line type)."""
+    gw, gh = float(row.get("gw") or 0), float(row.get("gh") or 0)
+    return gw > 0 and gw >= gh * 4
+
+
 def _general_rows(general: dict, prims: list, x0: float, top: float, inner: float, cols: int,
-                  style: dict, section: dict | None = None) -> float:
+                  style: dict, section: dict | None = None, pad: float = 0.0) -> float:
     """Place the general part on the same grid as the legend: one tile, the same
     text size, the same gap. A heading is only text and sits on the bottom line of
     its grid cell. Returns the bottom edge."""
     ts = float(style["text_size"])
     top = _general_header(prims, x0, top, inner, ts, section or {})
+    frame_x, frame_w = x0, inner
+    x0, inner = x0 + pad, inner - 2 * pad
     colw = inner / cols
     tile, slot, axis, text_x = tile_frame(style, colw)
-    # a tight grid must not shrink the line patterns of the general part until they blur:
-    # its tile stays at least 80 % of the tile that follows the text size
-    least = min(symbol_tile(style) * 0.8, colw * 0.4)
+    # a tight grid must not shrink the symbols of the general part until they blur: its
+    # tile stays at least 80 % of the tile that follows the text size. The text column
+    # stays where the other sections have it
+    least = min(symbol_tile(style) * 0.8, colw * 0.4, text_x - 1.2)
     if tile < least:
         tile = least
         slot = max(slot, tile)
         axis = tile / 2 + 0.4
-        text_x = max(text_x, axis + tile / 2 + 1.2)
     gap = max(0.0, float(style.get("entry_gap") or 0.0))
     cap = _line_cap(style)
     side = tile * TILE_FILL
     # one scale for all symbols of the general part, as in the drawing: a typical symbol
-    # fills the tile, a double symbol (ceiling / wall) keeps its width beside it
+    # fills the tile. Cables (long flat drawings) do not count, they fill the symbol column
     dims = sorted(max(float(r.get("gw") or 0), float(r.get("gh") or 0)) for r in general["rows"]
-                  if r.get("picture") == "symbol" and not r.get("heading"))
+                  if r.get("picture") == "symbol" and not r.get("heading") and not _cable(r))
     dims = [d for d in dims if d > 0]
-    common = side / dims[len(dims) // 2] if dims else 1.0
-    # symbol column: from the cell edge to the text. A double symbol at the common scale
-    # widens it (the texts of the general part move right), up to 45 % of the column
-    widest = max((float(r.get("gw") or 0) * common for r in general["rows"]
-                  if r.get("picture") == "symbol" and not r.get("heading")), default=0.0)
-    room_w = max(side, text_x - 1.2, min(widest + 1.5, colw * 0.45))
-    text_x = max(text_x, room_w + 1.2)
+    common = side * 0.85 / dims[len(dims) // 2] if dims else 1.0
+    # the texts stand in line with the texts of the other sections
+    room_w = max(side, text_x - 2.5)
     swatch_h = min(tile * 0.3, max(1.0, ts * 0.6))
     half = (slot - gap) / 2          # two colour codes and their gaps take one grid row
     rows = []
@@ -492,22 +496,20 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
                 elif r.get("gw") is not None and (gw > 0 or gh > 0):
                     line_row = r.get("picture") == "line" or (r.get("picture") != "symbol" and gh <= 0.35)
                     if line_row:
-                        # one sample of the stroke, as long as the symbol tile, so the line type
-                        # reads next to the symbols of the other sections
-                        # as long as the other cables of the general part at the common scale
-                        length = min(gw * common, room_w) if dims and gw > 0 else tile * 0.92
+                        # one sample of the stroke across the symbol column, so the line type reads
+                        length = room_w if gw > 0 else tile * 0.92
                         thick = 0.5
                         w, hgt, scale = length, thick, length / max(gw, 1e-6)
-                        prims.append({"t": "grow", "row": r["id"], "x": round(cx + axis - w / 2, 3),
+                        prims.append({"t": "grow", "row": r["id"], "x": round(cx + 1.5, 3),
                                       "y": round(mid - hgt / 2, 3), "w": round(w, 3), "h": round(hgt, 3),
                                       "k": round(scale, 5), "rot": 0})
                     elif r.get("picture") == "symbol":
                         # the whole symbol at the common scale of the general part; only a symbol
                         # that does not fit the row (height) or the symbol column (width) shrinks
                         view_h = max(slot - 0.4, side)
-                        fit = common * factor
-                        room = min(room_w, text_x - 2.5)
-                        fit = min(fit, view_h / max(gh, 1e-6), room / max(gw, 1e-6))
+                        # a cable fills the symbol column, so its line type stays readable
+                        fit = room_w / max(gw, 1e-6) if _cable(r) else common * factor
+                        fit = min(fit, view_h / max(gh, 1e-6), room_w / max(gw, 1e-6))
                         w, hgt = gw * fit, gh * fit
                         # centred on the symbol axis; a wide symbol keeps 1 mm to its text
                         # and 1.5 mm to the text of the column on the left
@@ -550,7 +552,7 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
     prims.append({"t": "grid", "block": "general", "x": x0, "y": top, "slot": slot, "gap": gap,
                   "tile": tile, "w": inner, "h": height, "row": slot + gap, "cols": cols, "colw": colw,
                   "axis": axis, "text": text_x})
-    prims.append({"t": "rect", "x": x0, "y": top, "w": inner, "h": height, "fill": None, "stroke": None,
+    prims.append({"t": "rect", "x": frame_x, "y": top, "w": frame_w, "h": height, "fill": None, "stroke": None,
                   "role": "general", "fit": 1.0, "rows": True})
     return bottom
 
@@ -598,7 +600,9 @@ def layout(doc: dict, sizes: dict | None = None, general: dict | None = None,
     section = doc.get("general_section") or {}
     if general and include_general and general.get("rows"):
         # same text size, tile and gap as the sections below, under its own category bar
-        y = _general_rows(general, prims, margin, y, inner, cols, style, section) + row * 0.5
+        # rows inset like the sections, so the texts stand in line with theirs
+        pad = next((float(b["style"]["padding"]) for b in doc.get("blocks") or []), 1.5)
+        y = _general_rows(general, prims, margin, y, inner, cols, style, section, pad) + row * 0.5
     elif general and include_general and general.get("h"):
         # no readable text column: the drawing stays whole, under the category bar
         y = _general_header(prims, margin, y, inner, ts, section)

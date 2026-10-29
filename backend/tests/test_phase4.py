@@ -1538,9 +1538,13 @@ def test_general_symbols_share_one_scale_and_allgemein_has_one_bar():
          "items": [{"id": "i", "kind": "note", "text": "Hinweis"}]}]})
     lay = layout(doc, {}, general)
     grow = {p["row"]: p for p in lay["prims"] if p["t"] == "grow"}
-    # the same factor for the single and the double symbol: the double one stays as tall
-    assert abs(grow["g0"]["k"] - grow["g1"]["k"]) < 1e-6
-    assert abs(grow["g0"]["h"] - grow["g1"]["h"]) < 1e-6 and grow["g1"]["w"] > grow["g0"]["w"] * 2.5
+    texts = {p["text"]: p["x"] for p in lay["prims"] if p["t"] == "text"}
+    # one factor for the single symbols; the double one shrinks only to fit the symbol
+    # column, the texts stay in line with the other sections
+    assert abs(grow["g0"]["k"] - grow["g2"]["k"]) < 1e-6
+    assert grow["g1"]["k"] <= grow["g0"]["k"] + 1e-6 and grow["g1"]["w"] > grow["g0"]["w"] * 1.5
+    assert grow["g1"]["x"] + grow["g1"]["w"] <= texts["Decke / Wand"] - 0.9
+    assert texts["Abzweigdose"] == pytest.approx(texts["Hinweis"], abs=0.01)
     bars = [p for p in lay["prims"] if p["t"] == "rect" and p.get("role") == "header"]
     assert len(bars) == 1 and bars[0]["fill"] == "#808080"
 
