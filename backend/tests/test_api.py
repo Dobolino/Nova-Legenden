@@ -47,7 +47,8 @@ def test_company_store_shared_between_instances(tmp_path):
 
 def test_auto_categories_rules(tmp_path):
     cats = CompanyStore(tmp_path / "f.sqlite").categories()
-    assert auto_categories("50", "Kombination", cats)[0] == ["schalter", "steckdosen"]
+    assert auto_categories("50", "Kombination", cats)[0] == ["schalter-schalter", "steckdosen-steckdosen"]
+    assert auto_categories("10", "Taster, liegend", cats)[0] == ["taster"]          # group by name
     assert auto_categories("xx", "Rauchmelder optisch", cats)[0] == ["bma"]
     assert auto_categories("xx", "Unbekannt", cats)[0] == ["diverse"]
 
@@ -92,7 +93,7 @@ def test_api_library_flow(home):
     fam = next(i for i in res["items"] if i["title"] == "Schalter, Schema 0")
     assert fam["representative"]["mounting"] == "UP"
     assert fam["mountings"][0] == "UP"
-    assert fam["categories"] == ["schalter"]
+    assert fam["categories"] == ["schalter-schalter"]
 
     variants = client.get("/api/library/families",
                           params={"q": "schalter schema 0", "all_variants": True}).json()
@@ -185,3 +186,12 @@ def test_library_cache_with_current_number_but_old_columns(tmp_path):
     con.commit()
     con.close()
     assert Library(db).symbols() == []
+
+
+def test_groups_split_a_section_by_number_range_and_name(tmp_path):
+    cats = CompanyStore(tmp_path / "f.sqlite").categories()
+    assert auto_categories("310", "1xRJ45-Steckdose", cats)[0] == ["edv"]
+    assert auto_categories("310", "Telefon", cats)[0] == ["telefon"]
+    assert auto_categories("310", "Anschlussdose Sprechanlage", cats)[0] == ["gsa"]
+    assert auto_categories("10", "Präsenzmelder 360°", cats)[0] == ["melder"]
+    assert auto_categories("350", "Kartenleser Zutritt Anlage", cats)[0] == ["zutritt"]

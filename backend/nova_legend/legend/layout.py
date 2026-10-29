@@ -494,6 +494,7 @@ def layout(doc: dict, sizes: dict | None = None, general: dict | None = None,
     """Place everything. ``sizes`` maps an item id to (x0, y0, x1, y1, engine) of its
     drawing in mm at scale 1 around its insertion point (or the older (width, height, engine)). ``general`` is {"w", "h"} of the locked part in mm (already fitted)."""
     sizes = sizes or {}
+    include_general = include_general and doc.get("general_on", True) is not False
     style = doc["style"]
     ts = style["text_size"]
     row = style["row"]

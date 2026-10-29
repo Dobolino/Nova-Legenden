@@ -123,6 +123,14 @@ class ThemeIn(BaseModel):
 
 # -- app factory -----------------------------------------------------------------
 
+def lineage(cat_id: str, parents: dict) -> list[str]:
+    """A category and its parents up to the section."""
+    out = [cat_id]
+    while parents.get(out[-1]) and parents[out[-1]] not in out:
+        out.append(parents[out[-1]])
+    return out
+
+
 def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="NOVA-Legenden", version=config.APP_VERSION)
     st = state or AppState()
@@ -264,13 +272,15 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
         fills = st.company.fill_settings()
         fams = st.library.families(st.family_options())
         words = [w for w in q.lower().split() if w]
+        parents = {c["id"]: c.get("parent") for c in categories}
         items = []
         for fam_id, fam in fams.items():
             rep = fam.representative
             if dataset and rep.dataset != dataset:
                 continue
             entry = family_entry(fam_id, fam, categories, assignments, fills)
-            if category and category not in entry["categories"]:
+            # a section also lists the symbols of its groups
+            if category and category not in {a for c in entry["categories"] for a in lineage(c, parents)}:
                 continue
             members = fam.members if all_variants else [rep]
             for sym in members:
@@ -350,11 +360,13 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
         dataset is counted, so the numbers match the visible tiles."""
         cats = st.company.categories()
         assignments = st.company.assignments()
+        parents = {c["id"]: c.get("parent") for c in cats}
         counts = {c["id"]: 0 for c in cats}
         for fam in st.library.families(st.family_options()).values():
             if dataset and fam.representative.dataset != dataset:
                 continue
-            for cid in family_categories(fam, cats, assignments)[0]:
+            # a section counts the families of its groups too (once)
+            for cid in {a for c in family_categories(fam, cats, assignments)[0] for a in lineage(c, parents)}:
                 if cid in counts:
                     counts[cid] += 1
         for c in cats:

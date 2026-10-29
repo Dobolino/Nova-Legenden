@@ -106,7 +106,7 @@ def test_family_key_and_label_variant():
 
 def test_category_by_number_range():
     assert category_for("230")[0] == "bma"
-    assert category_for("20")[0] == "schalter"
+    assert category_for("20")[0] == "schalter-schalter"
     assert category_for("xyz", "Rauchmelder")[0] == "bma"
 
 
@@ -138,7 +138,7 @@ def test_families_up_representative():
 
 def test_combinations_in_two_categories():
     from nova_legend.categories.defaults import categories_for
-    assert categories_for("50") == ["schalter", "steckdosen"]
+    assert categories_for("50") == ["schalter-schalter", "steckdosen-steckdosen"]
 
 
 def test_text_matrix_is_column_major():

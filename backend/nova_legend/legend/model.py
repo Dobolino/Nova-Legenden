@@ -153,6 +153,7 @@ def empty_doc(title: str = "", style: dict | None = None) -> dict:
             "title": {"text": title, "scale": 1.0, "size_mm": DEFAULT_TITLE_MM, "font": "Arial",
                       "color": "#000000", "border_on": False, "border": "#000000"},
             "general_section": _general_section(None),
+            "general_on": True,
             "blocks": []}
 
 
@@ -230,6 +231,8 @@ def normalize(doc: dict | None) -> dict:
                      "color": _hex(title.get("color"), "#000000"),
                      "border_on": bool(title.get("border_on")), "border": _hex(title.get("border"), "#000000")},
            "general_section": _general_section(doc.get("general_section")),
+           # False: this legend is shown and exported without the general part
+           "general_on": doc.get("general_on") is not False,
            "blocks": []}
     seen: set[str] = set()
 
@@ -449,7 +452,8 @@ def propose(rows: list[dict], categories: list[dict], by_category: bool,
             descriptions: dict[str, str], title: str, style: dict | None = None,
             colors: dict[str, str] | None = None, covered: set[str] | None = None,
             ap_covered: bool = False, layer_categories: dict[str, str] | None = None,
-            layer_colors: dict[str, str] | None = None, company_symbols: dict | None = None) -> dict:
+            layer_colors: dict[str, str] | None = None, company_symbols: dict | None = None,
+            split: set[str] | None = None, fixed_colors: set[str] | None = None) -> dict:
     """New legend with every apparatus in use, grouped by the first visible category.
 
     Every symbol is shown once (Legendenbesprechung 09.10.2026): a symbol on plan layers
@@ -468,11 +472,36 @@ def propose(rows: list[dict], categories: list[dict], by_category: bool,
     ``company_symbols`` (family key -> saved look) gives a symbol its company size, turn
     and mirror, and puts the symbols saved as one combined entry together when the
     project has them.
+
+    Sections and groups: a category with a parent is a group. Its symbols go to the
+    section (top category) unless the group is in ``split`` (a themed legend, e.g. only
+    «UKV»): then the group is a section of its own. The bar takes the colour most of the
+    section's symbols have in the plan; a company colour (``fixed_colors``) wins.
     """
     style = normalize_style(style)
     doc = empty_doc(title, style)
     colors = colors or {}
     cats = {c["id"]: c for c in categories}
+    parents = {c["id"]: c.get("parent") for c in categories}
+    split = set(split or [])
+
+    def chain(cid: str) -> list[str]:
+        out = [cid]
+        while parents.get(out[-1]) and parents[out[-1]] not in out:
+            out.append(parents[out[-1]])
+        return out
+
+    def place(cid: str | None) -> str | None:
+        """The section a category or group shows in (a split group is its own section)."""
+        if cid is None or cid not in cats:
+            return cid
+        up = chain(cid)
+        return next((a for a in up if a in split), up[-1])
+
+    def shown(cid: str) -> bool:
+        return cid in cats and not any(cats[a].get("hidden") for a in chain(cid) if a in cats)
+
+    layer_categories = {name: place(cid) for name, cid in (layer_categories or {}).items()}
     order = {c["id"]: i for i, c in enumerate(categories)}
     blocks: dict[str, dict] = {}
     votes: dict[str, dict[str, int]] = {}
@@ -493,11 +522,14 @@ def propose(rows: list[dict], categories: list[dict], by_category: bool,
     for row in rows:
         if int(row.get("total") or 0) <= 0 or not row.get("symbol_key"):
             continue
-        visible = [c for c in row.get("categories") or [] if c in cats and not cats[c].get("hidden")]
+        visible = []
+        for c in row.get("categories") or []:
+            if shown(c) and place(c) not in visible:
+                visible.append(place(c))
         from_layers: list[str] = []
         for name in row.get("layers") or {}:
             cid = (layer_categories or {}).get(name)
-            if cid and cid in cats and not cats[cid].get("hidden") and cid not in from_layers:
+            if cid and shown(cid) and cid not in from_layers:
                 from_layers.append(cid)
         if len(from_layers) >= 2:
             # once only: its own category if a layer belongs to it, else the busiest one
@@ -543,8 +575,8 @@ def propose(rows: list[dict], categories: list[dict], by_category: bool,
                 block["items"].append(item)
     for key, block in blocks.items():
         cid = block.get("category_id")
-        if _plan_hex(colors.get(cid)):
-            continue
+        if _plan_hex(colors.get(cid)) and (fixed_colors is None or cid in fixed_colors):
+            continue        # a company colour (or no plan colours known): the category decides
         bag = votes.get(key) or {}
         if bag:
             best = max(bag.items(), key=lambda kv: (kv[1], kv[0]))[0]

@@ -83,8 +83,9 @@ class ProposeIn(BaseModel):
 class NewLegendIn(BaseModel):
     name: str
     source: str = "proposal"                # "proposal", "empty" or "copy"
-    categories: list[str] | None = None     # proposal: only these categories
+    categories: list[str] | None = None     # proposal: only these sections or groups
     copy_of: int | None = None              # copy: this legend
+    general: bool | None = None             # show the general part (default: only the full legend)
 
 
 class RenameLegendIn(BaseModel):
@@ -706,12 +707,15 @@ def register(app: FastAPI, st, project, evaluator, category_colors) -> None:
         texts = {**stencil_names(ev, project_nova(p)), **descriptions}
         gen = load_general()
         layer_colors = {layer["name"]: layer.get("color") or "" for layer in p.layers()}
+        groups = {c["id"] for c in ev.categories if c.get("parent")}
         doc = propose(result["rows"], ev.categories, bool(st.company.options().get("legend_by_category", True)),
                       texts, title.strip(), style=style or project_style(p), colors=colors,
                       covered=covered_families(gen, result["rows"], descriptions),
                       ap_covered=bool({norm_text(AP_NOTE), norm_text(descriptions.get(AP_NOTE_KEY) or AP_NOTE)} & set(gen.texts)),
                       layer_categories=layer_categories, layer_colors=layer_colors,
-                      company_symbols=st.company.legend_settings().get("legend_company_symbols") or {})
+                      company_symbols=st.company.legend_settings().get("legend_company_symbols") or {},
+                      split={c for c in (categories or []) if c in groups},
+                      fixed_colors={c["id"] for c in picked if c.get("fixed")})
         fixed = st.company.category_colors().get("allgemein")
         if fixed:
             # the bar of the general part in the company colour of «Allgemein»
@@ -743,6 +747,8 @@ def register(app: FastAPI, st, project, evaluator, category_colors) -> None:
             doc = make_proposal(p, None, body.categories)
             if body.categories:
                 doc["title"]["text"] = name
+            # a themed legend (only UKV, only BMA) comes without the general part unless asked
+            doc["general_on"] = body.general if body.general is not None else not body.categories
         stored = p.add_legend(name, normalize(doc))
         return {"legend": {**stored, "doc": normalize(stored["doc"])}, "items": p.legends()}
 

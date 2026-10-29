@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ..config import current_user
-from .defaults import DATASET_RULES, DEFAULT_CATEGORIES, EXTRA_SHEETS, MERGED, NAME_FIRST, NAME_RULES
+from .defaults import DATASET_RULES, DEFAULT_CATEGORIES, NAME_FIRST, NAME_RULES, group_by_name
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -77,7 +77,7 @@ LEGEND_DEFAULTS = {
 
 # Bump when default categories gain number ranges; existing company files
 # are extended once (only ranges that are not assigned anywhere yet).
-DEFAULTS_VERSION = 4
+DEFAULTS_VERSION = 5
 
 CATEGORY_FIELDS = ("title", "parent", "layer", "columns", "spacing", "hidden", "sheets")
 # Company colour of a category: fixed for all projects, wins over the plan colour.
@@ -146,65 +146,54 @@ class CompanyStore:
         version = json.loads(row["value"]) if row else 1
         if version >= DEFAULTS_VERSION:
             return
-        # v3: Kommunikation, Uhren in Schwachstrom; v4: Gegensprechanlage in Kommunikation
-        added = self._migrate_v3(con) if version < 4 else []
-        rows = {r["id"]: json.loads(r["sheets"] or "[]")
-                for r in con.execute("SELECT id, sheets FROM categories")}
-        used = {s for sheets in rows.values() for s in sheets}
-        counts: dict[str, int] = {}
-        for extra in EXTRA_SHEETS.values():
-            for sheet in extra:
-                counts[sheet] = counts.get(sheet, 0) + 1
-        shared = {sheet for sheet, n in counts.items() if n > 1}
-        for cat_id, extra in EXTRA_SHEETS.items():
-            if cat_id not in rows:
-                continue
-            # A range may be added if nobody uses it yet, or if the defaults
-            # themselves put it into several categories (e.g. S_KombGr1).
-            new = [s for s in extra if s not in rows[cat_id]
-                   and (s not in used or s in shared)]
-            if new:
-                rows[cat_id] += new
-                used.update(new)
-                con.execute("UPDATE categories SET sheets=? WHERE id=?",
-                            (json.dumps(rows[cat_id]), cat_id))
-                added.append(f"{cat_id}: {', '.join(new)}")
-        if "schema" not in rows:
-            schema = next(c for c in DEFAULT_CATEGORIES if c.id == "schema")
-            sort = con.execute("SELECT COALESCE(MAX(sort), 0) + 1 FROM categories").fetchone()[0]
-            con.execute("INSERT INTO categories VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (schema.id, schema.title, None, schema.layer, schema.columns,
-                         schema.spacing_mm, sort, 0, "[]", "system", _now()))
-            added.append("neue Kategorie schema")
+        done = self._restructure(con)
         self._set_defaults_version(con)
-        self._log(con, "migrate", f"Standard v{DEFAULTS_VERSION}: " + "; ".join(added))
+        self._log(con, "migrate", f"Standard v{DEFAULTS_VERSION}: " + "; ".join(done))
 
-    def _migrate_v3(self, con) -> list[str]:
-        """Fewer sections (Legendenbesprechung 09.10.2026): Telefon, EDV / UKV and TV / Video
-        become «Kommunikation», Uhren go to «Schwachstrom», emergency lighting keeps its own
-        section. Assignments move along; nothing a company added itself is removed."""
-        done = []
-        ids = {r["id"] for r in con.execute("SELECT id FROM categories")}
-        if "kommunikation" not in ids and any(old in ids for old, new in MERGED.items() if new == "kommunikation"):
-            cat = next(c for c in DEFAULT_CATEGORIES if c.id == "kommunikation")
-            first = next(old for old in ("telefon", "edv", "tv", "gsa") if old in ids)
-            sort = con.execute("SELECT sort FROM categories WHERE id=?", (first,)).fetchone()[0]
-            parent = con.execute("SELECT parent FROM categories WHERE id=?", (first,)).fetchone()[0]
+    def _restructure(self, con) -> list[str]:
+        """Bring an older company file to the sections and groups of the defaults
+        (version 5). Missing categories are added, the groups go under their section and
+        take their number ranges from the section. Titles a company changed, its own
+        categories and its manual assignments stay as they are."""
+        done: list[str] = []
+        rows = {r["id"]: dict(r) for r in con.execute("SELECT * FROM categories")}
+        defaults = {c.id: c for c in DEFAULT_CATEGORIES}
+        old_titles = {"edv": "EDV und UKV", "fluchtweg": "Fluchtwegleuchten"}
+        sort = max([r["sort"] for r in rows.values()] or [0])
+        for cat in DEFAULT_CATEGORIES:
+            if cat.id in rows:
+                continue
+            # a group takes the place of its section in the order
+            near = rows.get(cat.parent or "") or {}
+            sort += 1
             con.execute("INSERT INTO categories VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (cat.id, cat.title, parent if parent in ids else None, cat.layer, cat.columns,
-                         cat.spacing_mm, sort, 0, "[]", "system", _now()))
-            ids.add("kommunikation")
-            done.append("neue Kategorie kommunikation")
-        for old, new in MERGED.items():
-            if old in ids and new in ids:
-                self._merge(con, old, new)
-                ids.discard(old)
-                done.append(f"{old} -> {new}")
-        if "fluchtweg" in ids:
-            row = con.execute("SELECT title FROM categories WHERE id='fluchtweg'").fetchone()
-            if row and row["title"] == "Fluchtwegleuchten":
-                con.execute("UPDATE categories SET title='Notbeleuchtung und Fluchtweg' WHERE id='fluchtweg'")
-                done.append("fluchtweg umbenannt")
+                        (cat.id, cat.title, None, cat.layer, cat.columns, cat.spacing_mm,
+                         near.get("sort", sort), 0, "[]", "system", _now()))
+            rows[cat.id] = {"id": cat.id, "title": cat.title, "parent": None, "sheets": "[]", "sort": sort}
+            done.append(f"neu {cat.id}")
+        sheets = {cid: json.loads(r["sheets"] or "[]") for cid, r in rows.items()}
+        for cat in DEFAULT_CATEGORIES:
+            row = rows[cat.id]
+            if row.get("parent") != cat.parent:
+                con.execute("UPDATE categories SET parent=? WHERE id=?", (cat.parent, cat.id))
+                done.append(f"{cat.id} unter {cat.parent or 'Hauptebene'}")
+            if old_titles.get(cat.id) and row.get("title") == old_titles[cat.id]:
+                con.execute("UPDATE categories SET title=? WHERE id=?", (cat.title, cat.id))
+            if not cat.parent:
+                continue
+            # number ranges of the group: from its section (or a merged sibling) into the group
+            for sheet in cat.sheets:
+                for cid, own in sheets.items():
+                    if cid == cat.id or sheet not in own:
+                        continue
+                    if defaults.get(cid) and sheet in defaults[cid].sheets:
+                        continue          # the defaults keep it there too (S_KombGr1)
+                    own.remove(sheet)
+                if sheet not in sheets[cat.id]:
+                    sheets[cat.id].append(sheet)
+        for cid, own in sheets.items():
+            if own != json.loads(rows[cid]["sheets"] or "[]"):
+                con.execute("UPDATE categories SET sheets=? WHERE id=?", (json.dumps(own), cid))
         return done
 
     # -- options ---------------------------------------------------------------
@@ -515,7 +504,14 @@ def auto_categories(sheet: str, name: str, categories: list[dict],
             return [cat_id], "Namensmuster"
     ids = [c["id"] for c in categories if sheet in c["sheets"]]
     if ids:
-        return ids, f"Nummernkreis {sheet}"
+        # a name rule may pick another group of the same section (Taster, Melder, Zutritt)
+        parents = {c["id"]: c.get("parent") for c in categories}
+        out: list[str] = []
+        for cid in ids:
+            g = group_by_name(cid, name, parents)
+            if g not in out:
+                out.append(g)
+        return out, f"Nummernkreis {sheet}"
     known = {c["id"] for c in categories}
     for fragment, cat_id in DATASET_RULES:
         if cat_id in known and fragment in dataset:
