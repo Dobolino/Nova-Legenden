@@ -84,7 +84,9 @@ DATASET_RULES: list[tuple[str, str]] = [
 # Name rules that win over the number range: emergency luminaires sit in the luminaire
 # sheets of Nova, but the legend shows them apart from «Licht»
 NAME_FIRST: list[tuple[str, str]] = [
-    (r"\bnot(leucht|beleucht|licht)|sicherheitsleucht|sicherheitsbeleucht", "notleuchten"),
+    (r"\bnot(leucht|beleucht|licht)|handnotleucht|sicherheitsleucht|sicherheitsbeleucht", "notleuchten"),
+    # Decken- / Wandauslass are luminaire outlets, even when Nova files them with the boxes
+    (r"auslass", "licht"),
 ]
 
 # Groups found by the name inside the section the number range gives

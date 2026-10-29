@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, Category, FamilyItem, Options } from "../api";
+import { api, Category, FamilyItem, Options, StencilCategoryRow } from "../api";
 import { CategoryDraft, draftOf, draftPatch, isDirty } from "../uiState";
 import { useNavigation, useUnsavedDraft } from "../Navigation";
 import Desc from "./Desc";
@@ -401,6 +401,8 @@ export default function Categories({ categories, options, notify, onChanged }: P
           </div>
         </div>
 
+        <StencilCard notify={notify} onChanged={onChanged} />
+
         <UnassignedCard categories={categories} notify={notify} onChanged={onChanged} />
 
         <div className="card">
@@ -532,6 +534,84 @@ function UnassignedCard({ categories, notify, onChanged }: {
                       ))}
                     </select>
                   </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Sections and groups from the company's user stencil: its tabs already sort by trade. */
+function StencilCard({ notify, onChanged }: { notify: (text: string, error?: boolean) => void; onChanged: () => void }) {
+  const [rows, setRows] = useState<StencilCategoryRow[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [all, setAll] = useState(false);
+
+  useEffect(() => {
+    api.stencilCategories().then((r) => setRows(r.items)).catch(() => setRows([]));
+  }, []);
+
+  async function run<T>(action: () => Promise<T>, ok: (r: T) => string) {
+    setBusy(true);
+    try {
+      const r = await action();
+      notify(ok(r));
+      setRows((await api.stencilCategories()).items);
+      onChanged();
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function download() {
+    const a = document.createElement("a");
+    a.href = `/api/stencils/categories/export/${encodeURIComponent("Kategorien aus Benutzerschablone.csv")}`;
+    a.download = "Kategorien aus Benutzerschablone.csv";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  if (!rows?.length) return null;
+  const changes = rows.filter((r) => r.change);
+  const shown = all ? rows : changes;
+  return (
+    <div className="card">
+      <h3>Aus der Benutzerschablone {changes.length ? <span className="badge">{changes.length} Änderungen</span> : null}</h3>
+      <Desc short="Vorschlag pro Symbol aus den Registerkarten deiner Schablone."
+        more="Die Registerkarte gibt den Abschnitt vor, Namensregeln korrigieren gemischte Karten, z. B. Deckenauslass zu Licht. «Übernehmen» speichert die Zuordnungen in der Firmendatei. In Excel kannst du die Spalte «Vorschlag-ID» ändern und die Datei wieder einlesen." />
+      <div className="row" style={{ gap: 6, flexWrap: "wrap", margin: "8px 0" }}>
+        <button className="btn small primary" disabled={busy || !changes.length}
+          onClick={() => run(api.applyStencilCategories, (r) => `${r.applied} Zuordnungen übernommen`)}>
+          Alle {changes.length} übernehmen
+        </button>
+        <button className="btn small" onClick={download}>Als Excel (CSV)</button>
+        <label className="btn small" style={{ cursor: "pointer" }}>
+          Aus CSV übernehmen
+          <input type="file" accept=".csv,text/csv" hidden onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) run(() => api.importAssignments(f), (r) => `${r.applied} Zuordnungen übernommen${r.skipped ? `, ${r.skipped} übersprungen` : ""}`);
+          }} />
+        </label>
+        <label className="toggle"><input type="checkbox" checked={all} onChange={(e) => setAll(e.target.checked)} /> Alle {rows.length} zeigen</label>
+      </div>
+      {shown.length > 0 && (
+        <div className="table-scroll" style={{ maxHeight: 360 }}>
+          <table className="list-table">
+            <thead><tr><th>Symbol</th><th>Registerkarte</th><th>Heute</th><th>Vorschlag</th></tr></thead>
+            <tbody>
+              {shown.map((r) => (
+                <tr key={r.family_key} className={r.change ? "" : "muted-row"}>
+                  <td className="wrap"><b>{r.name}</b> <span className="hint">{r.item}</span></td>
+                  <td className="hint">{r.tab}</td>
+                  <td className="wrap">{r.now_label || "–"}</td>
+                  <td className="wrap" title={r.reason}>{r.change ? <b>{r.suggestion_label}</b> : r.suggestion_label || "bleibt"}</td>
                 </tr>
               ))}
             </tbody>
