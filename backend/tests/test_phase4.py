@@ -1580,6 +1580,76 @@ def test_combined_entry_draws_its_symbols_side_by_side_with_one_text():
     assert a["x0"] >= grid["x"] + 0.29
 
 
+def test_combined_symbols_each_get_an_equal_tile_in_front_of_the_text():
+    doc = normalize({"version": 3, "style": {"columns": 2, "symbol_size": "tile"}, "blocks": [
+        {"id": "S", "title": "Schalter", "items": [
+            {"id": "c", "kind": "symbol", "symbol_key": "k1", "text": "Bewegungsmelder 180°",
+             "parts": [{"symbol_key": "k2", "text": "Bewegungsmelder 360°"}]},
+            {"id": "s", "kind": "symbol", "symbol_key": "k3", "text": "Taster"}]}]})
+    sizes = {"c": (-4.0, -4.0, 4.0, 4.0, False), "c#1": (-1.0, -6.0, 1.0, 6.0, False),
+             "s": (-3.0, -3.0, 3.0, 3.0, False)}
+    lay = layout(doc, sizes)
+    grid = next(p for p in lay["prims"] if p["t"] == "grid")
+    frames = sorted(grid["frames"], key=lambda r: (r["y"], r["x"]))
+    pair = [r for r in frames if abs(r["w"] - grid["tile"]) > 0.05]
+    lone = [r for r in frames if abs(r["w"] - grid["tile"]) <= 0.05]
+    assert len(pair) == 2 and len(lone) >= 1
+    assert pair[0]["w"] == pytest.approx(pair[1]["w"]) and pair[0]["h"] == pytest.approx(grid["tile"])
+    assert pair[0]["w"] < grid["tile"] and pair[0]["y"] == pytest.approx(lone[0]["y"])
+    gap = pair[1]["x"] - (pair[0]["x"] + pair[0]["w"])
+    assert gap == pytest.approx(0.45, abs=0.05)
+    assert pair[1]["x"] + pair[1]["w"] <= grid["x"] + grid["text"] - 0.4
+    syms = [p for p in lay["prims"] if p["t"] == "symbol" and p["id"] == "c"]
+    for sym, frame in zip(sorted(syms, key=lambda p: p["cx"]), pair):
+        assert sym["cx"] == pytest.approx(frame["x"] + frame["w"] / 2, abs=0.02)
+        assert sym["cy"] == pytest.approx(frame["y"] + frame["h"] / 2, abs=0.02)
+        assert max(sym["w"], sym["h"]) <= frame["w"] * 0.75 + 0.02
+
+
+def test_combined_description_stays_on_the_same_text_line():
+    """A wrapped combination keeps the column: same text x, first line on the
+    one-line baseline, and the tiles inside the normal symbol box."""
+    items = [
+        {"id": "c", "kind": "symbol", "symbol_key": "k1", "text": "Bewegungsmelder 180°, stehend",
+         "parts": [{"symbol_key": "k2", "text": "Bewegungsmelder 360°"}]},
+        {"id": "d", "kind": "symbol", "symbol_key": "k3", "text": "Drehschalter"},
+        {"id": "l", "kind": "symbol", "symbol_key": "k4", "text": "Lichtregler mit Schalter"},
+        {"id": "a", "kind": "symbol", "symbol_key": "k5", "text": "Präsenzmelder 180°"},
+        {"id": "b", "kind": "symbol", "symbol_key": "k6", "text": "Präsenzmelder 360°"},
+        {"id": "n", "kind": "symbol", "symbol_key": "k7", "text": "Präsenzmelder 90°, stehend"},
+    ]
+    doc = normalize({"version": 3, "style": {"columns": 3, "symbol_size": "tile", "grid": "standard"},
+                     "blocks": [{"id": "S", "title": "Schalter und Taster", "items": items}]})
+    sizes = {it["id"]: (-4.0, -4.0, 4.0, 4.0, False) for it in items}
+    sizes["c#1"] = (-4.0, -4.0, 4.0, 4.0, False)
+    lay = layout(doc, sizes)
+    hits = {h["id"]: h for h in boxes(lay)}
+    lines = {}
+    for p in lay["prims"]:
+        if p["t"] == "text" and p.get("item"):
+            lines.setdefault(p["item"], []).append(p)
+    grid = next(p for p in lay["prims"] if p["t"] == "grid")
+    col = [hits[i] for i in ("c", "d", "l") if abs(hits[i]["x"] - hits["c"]["x"]) < 0.1]
+    txs = {lines[h["id"]][0]["x"] for h in col}
+    assert len(txs) == 1
+    first = lines["c"][0]
+    neighbour = lines["n"][0]
+    assert first["y"] - hits["c"]["y"] == pytest.approx(neighbour["y"] - hits["n"]["y"], abs=0.05)
+    assert lines["c"][1]["y"] > first["y"]
+    assert lines["c"][1]["x"] == first["x"]
+    assert hits["c"]["y"] < lines["c"][1]["y"] <= hits["c"]["y"] + hits["c"]["h"]
+    frames = [r for r in grid["frames"] if hits["c"]["y"] - 0.1 <= r["y"] <= hits["c"]["y"] + hits["c"]["h"]]
+    pair = sorted(frames, key=lambda r: r["x"])[:2]
+    lone = next(r for r in grid["frames"] if abs(r["y"] - (hits["d"]["y"] + (hits["d"]["h"] - r["h"]) / 2)) < 0.2
+                and abs(r["x"] - (hits["d"]["x"] + grid["axis"] - grid["tile"] / 2)) < 0.2)
+    assert pair[0]["x"] == pytest.approx(lone["x"], abs=0.05)
+    assert pair[-1]["x"] + pair[-1]["w"] == pytest.approx(lone["x"] + lone["w"], abs=0.05)
+    syms = [p for p in lay["prims"] if p["t"] == "symbol" and p["id"] == "c"]
+    right = max(s["x0"] + s["w"] for s in syms)
+    assert right <= pair[-1]["x"] + pair[-1]["w"] + 0.05
+    assert first["x"] - right >= 1.0
+
+
 def test_a_general_row_with_a_slash_covers_each_of_its_parts():
     from nova_legend.api.legend import covered_families
     from nova_legend.legend.general import GeneralPart, norm_text, text_parts

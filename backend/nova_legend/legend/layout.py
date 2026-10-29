@@ -18,9 +18,9 @@ Entries fill 2 or 3 columns top to bottom. In every column of a section all
 symbol centres sit on one vertical axis and all texts start on one vertical
 text line right of the widest symbol. Every entry takes a whole number of grid
 rows, so the entries sit exactly in the grid placeholders of their section.
-Symbol and text of a row share the same
-horizontal middle. Text wraps inside its column; a row grows with its text or
-symbol, so nothing overlaps the next entry or column. Symbols turn in steps of
+The symbol and the first line of the text share the same horizontal middle;
+further lines go downward. Text wraps inside its column; a row grows with its
+text or symbol, so nothing overlaps the next entry or column. Symbols turn in steps of
 90 degrees around their centre; texts stay horizontal.
 """
 
@@ -259,12 +259,56 @@ PART_SIZE = 0.8     # each symbol of a combined entry is a bit smaller than a si
 PART_MARGIN = 1.0   # mm of free space left of the group and before the text
 
 
-def _combined(item: dict, sizes: dict, single, room: tuple[float, float, float] | None = None) -> dict:
+def _combined_tiles(item: dict, sizes: dict, single, room: tuple[float, float, float], tile: float) -> dict:
+    """Combined entry in tile mode: one equal square per symbol, side by side.
+
+    The squares shrink together so the group stays in the symbol column, and each
+    drawing is centred in its own square the same way a single symbol fills its tile."""
+    axis, lo, hi = room
+    parts = item.get("parts") or []
+    members = [item] + [{**item, **part, "kind": "symbol", "parts": None} for part in parts]
+    n = len(members)
+    # The group stays inside the same outer box as one normal tile, so the
+    # description keeps the same gap and the texts of the column stay in line.
+    gap = 0.45
+    span = max(hi - lo, 1.0)
+    side = min(float(tile), (span - gap * (n - 1)) / n)
+    if side < 2.0:
+        gap = 0.2
+        side = (span - gap * (n - 1)) / n
+    if side <= 0:
+        gap = 0.0
+        side = span / n
+    total = n * side + (n - 1) * gap
+    if total > span:
+        gap = 0.0
+        side = span / n
+        total = span
+    origin = min(max(axis - total / 2, lo), hi - total)
+    frames = []
+    out_parts = []
+    for i, part in enumerate(members):
+        key = item["id"] if i == 0 else f"{item['id']}#{i}"
+        box = single(part, sizes.get(key), side, False)
+        dx = origin + i * (side + gap) + side / 2 - axis
+        # as tall as the normal tile, only narrower, so the row of tiles stays even
+        frames.append({"dx": round(dx, 4), "side": round(side, 4), "h": round(float(tile), 4)})
+        out_parts.append({"dx": round(dx, 4), "box": box, "part": part})
+    return {"left": round(axis - origin, 4), "right": round(origin + total - axis, 4),
+            "up": float(tile) / 2, "down": float(tile) / 2,
+            "scale": out_parts[0]["box"]["scale"], "ax": out_parts[0]["box"]["ax"],
+            "ay": out_parts[0]["box"]["ay"], "parts": out_parts, "frames": frames}
+
+
+def _combined(item: dict, sizes: dict, single, room: tuple[float, float, float] | None = None,
+              tile: float | None = None) -> dict:
     """Box of an entry. A combined entry (``parts``) puts its symbols side by side, each
     with its own size rule, the group centred on the symbol axis. ``room`` = (axis,
     left edge, right edge) of the symbol column: a group wider than that shrinks and
-    moves so it never runs into the text."""
+    moves so it never runs into the text. In tile mode each symbol gets its own square."""
     parts = item.get("parts") or []
+    if tile and room and parts and item["kind"] == "symbol":
+        return _combined_tiles(item, sizes, single, room, tile)
     first = single(item, sizes.get(item["id"]))
     if not parts or item["kind"] != "symbol":
         return first
@@ -592,8 +636,15 @@ def _block(block, style, sizes, prims, x0, y, inner, cols, ts, row, continued: b
         # equal tiles: every drawing fills one tile sized from the text.
         # a raster other than Standard uses the chosen row height and text distance
         tile, fixed, axis, text_x = tile_frame(style, colw)
-        boxes = {it["id"]: _combined(it, sizes, lambda part, size: _symbol_box(part, size, style, tile),
-                                     (axis, 0.3, text_x - 0.8)) for it in items}
+        def tile_box(part, size, side=tile, even=True):
+            # a combined symbol fills its own cell; the shared area rule would
+            # leave it looking small inside the narrower tile
+            used = style if even else {**style, "normalize_size": False}
+            return _symbol_box(part, size, used, side)
+
+        # the pair fills the normal tile, it does not reach into the text column
+        boxes = {it["id"]: _combined(it, sizes, tile_box, (axis, axis - tile / 2, axis + tile / 2), tile)
+                 for it in items}
     per_col = math.ceil(len(items) / cols) if items else 0
     col_heights = []
     # every place of the grid is a cell (also the empty ones): the editor drops entries
@@ -626,9 +677,31 @@ def _block(block, style, sizes, prims, x0, y, inner, cols, ts, row, continued: b
         col_heights.append((used[-1]["y"] + used[-1]["h"] - (top + head_h + pad)) if used else 0.0)
     body_h = max(col_heights or [0.0]) if items else row
     total_h = head_h + pad + body_h + pad
+    frames = None
+    if not real:
+        frames = []
+        grid_top = top + head_h + pad
+        for cell in cells:
+            if cell["y"] > grid_top + body_h - 0.05:
+                continue
+            box = boxes.get(cell["id"]) if cell.get("id") else None
+            custom = (box or {}).get("frames")
+            # a wrapped line may lengthen the row downward; the tile stays on the
+            # one-line middle, together with the first line of the description
+            mid = cell["y"] + fixed / 2 if cell["h"] > fixed + 0.05 else cell["y"] + cell["h"] / 2
+            if custom:
+                for fr in custom:
+                    side = fr["side"]
+                    hgt = fr.get("h", side)
+                    frames.append({"x": round(cell["x"] + axis + fr["dx"] - side / 2, 3),
+                                   "y": round(mid - hgt / 2, 3),
+                                   "w": round(side, 3), "h": round(hgt, 3)})
+            else:
+                frames.append({"x": round(cell["x"] + axis - tile / 2, 3),
+                               "y": round(mid - tile / 2, 3), "w": tile, "h": tile})
     prims.append({"t": "grid", "block": block["id"], "x": x0 + pad, "y": top + head_h + pad,
                   "slot": row if fixed is None else fixed, "gap": gap_mm,
-                  "tile": None if real else tile,
+                  "tile": None if real else tile, "frames": frames,
                   "w": inner - 2 * pad, "h": body_h, "row": (row if fixed is None else fixed) + gap_mm,
                   "cols": cols, "colw": colw,
                   "axis": axis, "text": text_x})
@@ -684,11 +757,23 @@ def _entry(item, box, out, block, cx0, cy, colw, ts, row, axis, text_x, st,
         sym_h = 2 * max(box["up"], box["down"])
         need = max(reserve * lh + TEXT_CLEARANCE, sym_h + SYMBOL_CLEARANCE if sym_h else 0.0)
         h = row * max(1, math.ceil(need / row - 1e-3))
-    elif lines_n:
-        h = fixed_h
+        mid = cy + h / 2
+        # the text block stays centred on the symbol
+        base = mid - (reserve - 1) * lh / 2 + its * 0.32
     else:
-        h = max(fixed_h, reserve * lh + TEXT_CLEARANCE)
-    mid = cy + h / 2
+        # The first line of every entry shares the baseline of a one-line row.
+        # Further lines go downward. The row keeps its height while they fit,
+        # and grows only when a longer text needs the room below that line.
+        mid = cy + fixed_h / 2
+        base = mid + its * 0.32
+        if lines_n:
+            h = fixed_h
+        else:
+            bottom = (base - cy) + (reserve - 1) * lh + its * 0.15
+            h = fixed_h if bottom <= fixed_h else bottom
+        limit = cy + h - (reserve - 1) * lh - its * 0.1
+        if base > limit:
+            base = limit
     sx = cx0 + axis
     w = box["left"] + box["right"]
     # symbol_color paints this one entry in one colour. Otherwise a symbol keeps the
@@ -723,8 +808,6 @@ def _entry(item, box, out, block, cx0, cy, colw, ts, row, axis, text_x, st,
     elif kind == "note":
         out.append({"t": "half", "cx": round(sx, 3), "cy": round(mid, 3), "r": round(w / 2, 3), "color": paint,
                     "item": item["id"]})
-    # The first line of every entry shares one baseline. Further lines go downward.
-    base = mid - (reserve - 1) * lh / 2 + its * 0.32
     for i, line in enumerate(lines):
         out.append({"t": "text", "x": round(tx, 3), "y": round(base + i * lh, 3), "size": round(its, 3),
                     "text": line, "bold": False, "color": st["text"], "item": item["id"]})
