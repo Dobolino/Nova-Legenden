@@ -16,6 +16,7 @@ export default function ProjectsPage({ categories, novaVersion, notify, onOpenSe
   const [items, setItems] = useState<ProjectSummary[]>([]);
   const [folder, setFolder] = useState("");
   const [folderExists, setFolderExists] = useState(true);
+  const [sharedFolder, setSharedFolder] = useState(true);
   const [open, setOpen] = useState<string | null>(null);
   const [dialog, setDialog] = useState(false);
   const [query, setQuery] = useState("");
@@ -27,6 +28,7 @@ export default function ProjectsPage({ categories, novaVersion, notify, onOpenSe
       setItems(res.items);
       setFolder(res.folder);
       setFolderExists(res.folder_exists);
+      setSharedFolder(res.shared !== false);
     } catch (e) {
       notify((e as Error).message, true);
     }
@@ -144,7 +146,7 @@ export default function ProjectsPage({ categories, novaVersion, notify, onOpenSe
         )}
         <details className="project-location">
           <summary>Projektordner anzeigen</summary>
-          <p>{folder}{!folderExists && " (wird beim ersten Projekt angelegt)"}</p>
+          <p>{folder}{!folderExists && " (wird beim ersten Projekt angelegt)"}{!sharedFolder && " Nur dieser Computer, bis in den Einstellungen ein gemeinsamer Ordner steht."}</p>
           <button className="btn small" onClick={onOpenSettings}>Ordner in den Einstellungen ändern</button>
         </details>
       </div>

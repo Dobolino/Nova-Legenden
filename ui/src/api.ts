@@ -45,6 +45,8 @@ export interface Category {
   sort: number;
   hidden: boolean;
   sheets: string[];
+  /** company colour, the same in every project ("" = colour of the plan layer) */
+  color?: string;
   family_count?: number;
   updated_by?: string;
   updated_at?: string;
@@ -74,6 +76,7 @@ export interface Settings {
   oda_path: string;
   ui_theme?: string;
   update_channel?: "stable" | "test";
+  stencil_folder?: string;
 }
 
 export interface UpdateInfo {
@@ -102,6 +105,7 @@ export interface Status {
   oda: string;
   local_home: string;
   dialogs?: boolean;
+  is_admin?: boolean;
 }
 
 export interface SymbolDetail {
@@ -256,9 +260,20 @@ export interface Review {
 }
 
 export interface StoredLegend {
+  id?: number;
+  name?: string;
   doc: LegendDoc;
   updated_at: string;
   updated_by: string;
+}
+
+/** One of the named legends of a project. */
+export interface LegendListItem {
+  id: number;
+  name: string;
+  updated_at: string;
+  updated_by: string;
+  entries: number;
 }
 
 export interface GeneralInfo {
@@ -267,6 +282,38 @@ export interface GeneralInfo {
   error: string;
   w: number;
   h: number;
+  file?: string;
+  /** a DXF / DWG split into rows (graphic + text): they flow into the legend columns */
+  rows?: { id: string; key?: string; text: string; heading: boolean; names: string[]; text_scale?: number; symbol_factor?: number; rotation?: number; text_place?: "top" | "middle" | "bottom"; line?: boolean; picture?: "line" | "swatch" | "symbol"; swatch?: string }[];
+  /** drawing of every row graphic (preview), by row id */
+  row_svgs?: Record<string, { vb: string; svg: string }>;
+}
+
+/** One row of the general part as the settings editor shows it. */
+export interface GeneralRow {
+  id: string;
+  key: string;
+  original: string;
+  text: string;
+  hidden: boolean;
+  links: string[];
+  heading: boolean;
+  names: string[];
+  vb: string;
+  svg: string;
+  extra?: boolean; // added from the symbol library in the settings
+  extra_id?: string;
+  symbol_key?: string;
+  family_key?: string;
+  by: string;
+  at: string;
+}
+
+export interface CompanyGeneral extends GeneralInfo {
+  file_time: number | null;
+  rows: GeneralRow[];
+  oda?: boolean;
+  company: CompanyLegend;
 }
 
 export interface CompanyLegend {
@@ -274,20 +321,75 @@ export interface CompanyLegend {
   admins: string[];
   text_size: number;
   symbol_scale: number;
+  hatch_off: boolean;
+  fill_off: boolean;
   user: string;
   is_admin: boolean;
   bootstrap: boolean;
+}
+
+/** A company legend text of one symbol family. */
+export interface CompanyText {
+  family_key: string;
+  text: string;
+  updated_by: string | null;
+  updated_at: string | null;
+  title: string;
+  svg: string;
+  known: boolean;
+}
+
+/** One entry of your Nova user stencil (Benutzerschablone). */
+export interface StencilEntry {
+  name: string;
+  description: string;
+  item: string | null;
+  layer: string | null;
+  symbol_key: string | null;
+  family_key: string | null;
+  categories: string[];
+  macro: string | null;
+  macro_found: boolean;
+}
+
+export interface StencilData {
+  folder: string;
+  found: boolean;
+  files: string[];
+  errors: string[];
+  nova: string;
+  sets: { name: string; description: string; tabs: { name: string; description: string; entries: StencilEntry[] }[] }[];
 }
 
 export interface LegendInfo {
   legend: StoredLegend | null;
   template_texts: string[];
   descriptions: Record<string, string>;
+  stencil_names?: Record<string, string>;
   grids: { id: string; label: string; row: number; text_offset: number }[];
   style: LegendDoc["style"];
   company: CompanyLegend;
   oda: boolean;
   in_general: GeneralContents;
+  company_symbols?: Record<string, CompanySymbolLook>;
+}
+
+/** How a symbol family looks in every legend of the company («Firmensymbol»). */
+export interface CompanySymbolLook {
+  symbol_factor: number;
+  rotation: number;
+  mirror: boolean;
+  parts: { family_key: string; symbol_factor: number; rotation: number; mirror: boolean; title?: string }[];
+  by?: string;
+  at?: string;
+}
+
+export interface CompanySymbolItem extends CompanySymbolLook {
+  family_key: string;
+  title: string;
+  text: string;
+  category: string;
+  category_title: string;
 }
 
 /** What the general part already shows (texts normalised like normText in legend.ts). */
@@ -440,7 +542,7 @@ const qs = (params: Record<string, string | boolean | number>) =>
 
 export const api = {
   status: () => request<Status>("GET", "/api/status"),
-  projects: () => request<{ folder: string; folder_exists: boolean; items: ProjectSummary[] }>("GET", "/api/projects"),
+  projects: () => request<{ folder: string; folder_exists: boolean; shared?: boolean; items: ProjectSummary[] }>("GET", "/api/projects"),
   createProject: (name: string, nova_version: string, template: string | null, projectNumber = "") =>
     request<ProjectDetail>("POST", "/api/projects", { name, nova_version, template, project_number: projectNumber }),
   project: (id: string) => request<ProjectDetail>("GET", `/api/projects/${encodeURIComponent(id)}`),
@@ -510,21 +612,34 @@ export const api = {
   reorder: (ids: string[]) => request<{ items: Category[] }>("POST", "/api/categories/reorder", { ids }),
   dialog: (kind: "dataset" | "folder" | "legend", start = "") =>
     request<{ available: boolean; path: string | null }>("POST", `/api/dialog/${kind}`, { start }),
-  legend: (id: string) =>
-    request<LegendInfo>("GET", `/api/projects/${encodeURIComponent(id)}/legend`),
-  saveLegend: (id: string, doc: LegendDoc, signal?: AbortSignal) =>
-    request<{ legend: StoredLegend }>("PUT", `/api/projects/${encodeURIComponent(id)}/legend`, { doc }, signal),
+  legend: (id: string, legendId?: number | null) =>
+    request<LegendInfo>("GET", `/api/projects/${encodeURIComponent(id)}/legend${legendId ? `?legend=${legendId}` : ""}`),
+  saveLegend: (id: string, doc: LegendDoc, signal?: AbortSignal, legendId?: number | null) =>
+    request<{ legend: StoredLegend }>("PUT", `/api/projects/${encodeURIComponent(id)}/legend${legendId ? `?legend=${legendId}` : ""}`, { doc }, signal),
+  legends: (id: string) => request<{ items: LegendListItem[] }>("GET", `/api/projects/${encodeURIComponent(id)}/legends`),
+  newLegend: (id: string, body: { name: string; source: "proposal" | "empty" | "copy"; categories?: string[]; copy_of?: number | null; general?: boolean }) =>
+    request<{ legend: StoredLegend; items: LegendListItem[] }>("POST", `/api/projects/${encodeURIComponent(id)}/legends`, body),
+  renameLegend: (id: string, legendId: number, name: string) =>
+    request<{ items: LegendListItem[] }>("PUT", `/api/projects/${encodeURIComponent(id)}/legends/${legendId}`, { name }),
+  deleteLegend: (id: string, legendId: number) =>
+    request<{ items: LegendListItem[] }>("DELETE", `/api/projects/${encodeURIComponent(id)}/legends/${legendId}`),
   proposeLegend: (id: string, style?: LegendDoc["style"]) =>
     request<{ doc: LegendDoc }>("POST", `/api/projects/${encodeURIComponent(id)}/legend/propose`, { style: style ?? null }),
   layoutLegend: (id: string, doc: LegendDoc, signal?: AbortSignal) =>
     request<LegendLayout>("POST", `/api/projects/${encodeURIComponent(id)}/legend/layout`, { doc }, signal),
   legendGeneral: (id: string) =>
     request<GeneralInfo & { svg: string; prims: LegendPrim[] }>("GET", `/api/projects/${encodeURIComponent(id)}/legend/general`),
-  legendExportName: (id: string, format: "dxf" | "dwg", block: string) =>
-    request<{ name: string }>("GET", `/api/projects/${encodeURIComponent(id)}/legend/export-name?${qs({ format, block })}`),
+  legendExportName: (id: string, format: "dxf" | "dwg" | "pdf", block: string, legendId?: number | null) =>
+    request<{ name: string }>("GET", `/api/projects/${encodeURIComponent(id)}/legend/export-name?${qs({ format, block, ...(legendId ? { legend: legendId } : {}) })}`),
   /** The file name is part of the path, so the download keeps it even if the header is ignored. */
-  legendExportUrl: (id: string, name: string, format: "dxf" | "dwg", block: string, general: boolean) =>
-    `/api/projects/${encodeURIComponent(id)}/legend/export/${encodeURIComponent(name)}?${qs({ format, block, general })}`,
+  legendExportUrl: (id: string, name: string, format: "dxf" | "dwg" | "pdf", block: string, general: boolean, legendId?: number | null) =>
+    `/api/projects/${encodeURIComponent(id)}/legend/export/${encodeURIComponent(name)}?${qs({ format, block, general, ...(legendId ? { legend: legendId } : {}) })}`,
+  descriptions: () => request<{ items: CompanyText[]; file: string }>("GET", "/api/descriptions"),
+  stencils: (projectId: string, nova = "") =>
+    request<StencilData>("GET", `/api/stencils?${qs(projectId ? { project_id: projectId } : { nova })}`),
+  macroPreviewUrl: (projectId: string, path: string) => `/api/stencils/macro-preview?${qs({ project_id: projectId, path })}`,
+  descriptionsExportUrl: "/api/descriptions/export/edeco%20ag-Firmentexte.csv",
+  importDescriptions: (file: File) => upload<{ changed: number; removed: number; rows: number }>("/api/descriptions/import", {}, file),
   legendExportFile: async (url: string): Promise<Blob> => {
     const res = await fetch(url);
     if (!res.ok) {
@@ -542,10 +657,24 @@ export const api = {
   rememberLegend: (id: string, doc: LegendDoc) =>
     request<CompanyLegend>("POST", `/api/projects/${encodeURIComponent(id)}/legend/remember`, { doc }),
   companyLegend: () => request<CompanyLegend & { general: GeneralInfo }>("GET", "/api/company/legend"),
-  saveCompanyLegend: (values: { general_path?: string; admins?: string[]; text_size?: number; symbol_scale?: number }) =>
+  companyGeneral: () => request<CompanyGeneral>("GET", "/api/company/general"),
+  saveGeneralRow: (row: { key: string; text?: string; hidden?: boolean; links?: string[]; text_scale?: number; symbol_factor?: number; rotation?: number; text_place?: "top" | "middle" | "bottom" }) =>
+    request<CompanyGeneral>("PUT", "/api/company/general/row", row),
+  companySymbols: () => request<{ items: CompanySymbolItem[]; symbols: Record<string, CompanySymbolLook> }>("GET", "/api/company/symbols"),
+  saveCompanySymbol: (body: { family_key: string; text?: string; category?: string | null; symbol_factor: number; rotation: number; mirror: boolean;
+    parts: { family_key: string; symbol_factor: number; rotation: number; mirror: boolean }[] }) =>
+    request<{ items: CompanySymbolItem[]; symbols: Record<string, CompanySymbolLook> }>("PUT", "/api/company/symbols", body),
+  resetCompanySymbol: (familyKey: string) =>
+    request<{ items: CompanySymbolItem[]; symbols: Record<string, CompanySymbolLook> }>("DELETE", `/api/company/symbols/${encodeURIComponent(familyKey)}`),
+  reloadGeneral: () => request<CompanyGeneral>("POST", "/api/company/general/reload"),
+  addGeneralRow: (row: { text: string; symbol_key: string; family_key: string | null; after: string }) =>
+    request<CompanyGeneral>("POST", "/api/company/general/extra", row),
+  removeGeneralRow: (extraId: string) => request<CompanyGeneral>("DELETE", `/api/company/general/extra/${encodeURIComponent(extraId)}`),
+  orderGeneral: (keys: string[]) => request<CompanyGeneral>("PUT", "/api/company/general/order", { keys }),
+  saveCompanyLegend: (values: { general_path?: string; admins?: string[]; text_size?: number; symbol_scale?: number; hatch_off?: boolean; fill_off?: boolean }) =>
     request<CompanyLegend & { general: GeneralInfo }>("PUT", "/api/company/legend", values),
-  legendSymbols: (items: { symbol_key: string; family_key: string | null; length_mm: number | null; width_mm: number | null }[], stripFill = false) =>
-    request<{ items: SymbolRender[] }>("POST", "/api/legend/symbols", { items, strip_fill: stripFill }),
+  legendSymbols: (items: { symbol_key: string; family_key: string | null; length_mm: number | null; width_mm: number | null; flat?: boolean }[], fills: { hatch_off: boolean; fill_off: boolean } = { hatch_off: false, fill_off: false }) =>
+    request<{ items: SymbolRender[] }>("POST", "/api/legend/symbols", { items, ...fills }),
   diagnostics: (projectId = "") =>
     request<Record<string, unknown>>("GET", `/api/diagnostics${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`),
   legendTexts: (q: string, familyKey = "") =>
@@ -555,6 +684,18 @@ export const api = {
     ),
   setDescription: (familyKey: string, text: string | null) =>
     request<{ ok: boolean; text: string | null }>("PUT", "/api/descriptions", { family_key: familyKey, text }),
+  setCategoryColor: (id: string, color: string) =>
+    request<{ items: Category[] }>("PUT", `/api/categories/${encodeURIComponent(id)}/color`, { color }),
+  checkCategories: () =>
+    request<{ items: { kind: string; text: string; ids: string[] }[] }>("GET", "/api/categories/check"),
+  mergeCategories: (source: string, target: string) =>
+    request<{ items: Category[] }>("POST", "/api/categories/merge", { source, target }),
+  familyCategories: (familyKey: string) =>
+    request<{ family_key: string; categories: string[]; source: string }>(
+      "GET", `/api/category-family?${qs({ family_key: familyKey })}`),
+  setFamilyCategories: (familyKey: string, categories: string[] | null) =>
+    request<{ family_key: string; categories: string[]; source: string }>(
+      "PUT", "/api/category-family", { family_key: familyKey, categories }),
   resetCategories: () => request<{ items: Category[] }>("POST", "/api/categories/reset"),
 };
 

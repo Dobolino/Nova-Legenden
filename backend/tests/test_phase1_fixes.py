@@ -44,25 +44,25 @@ def counts(client, dataset=""):
 # 2. parent: null makes a sub category a main category again -------------------
 
 def test_parent_null_releases_sub_category(client):
-    tel = client.put("/api/categories/telefon", json={"parent": None})
+    tel = client.put("/api/categories/kommunikation", json={"parent": None})
     assert tel.status_code == 200, tel.text
     assert tel.json()["parent"] is None
     # Fields that were not sent stay unchanged
-    assert tel.json()["title"] == "Telefon" and tel.json()["layer"] == "E_Telefon"
+    assert tel.json()["title"] == "Kommunikation" and tel.json()["layer"] == "E_EDV"
 
 
 def test_update_without_fields_is_rejected(client):
-    assert client.put("/api/categories/telefon", json={}).status_code == 400
+    assert client.put("/api/categories/kommunikation", json={}).status_code == 400
 
 
 def test_title_null_is_ignored_not_cleared(client):
-    res = client.put("/api/categories/telefon", json={"title": None, "columns": 3})
+    res = client.put("/api/categories/kommunikation", json={"title": None, "columns": 3})
     assert res.status_code == 200
-    assert res.json()["title"] == "Telefon" and res.json()["columns"] == 3
+    assert res.json()["title"] == "Kommunikation" and res.json()["columns"] == 3
 
 
 def test_parent_cannot_be_itself(client):
-    assert client.put("/api/categories/telefon", json={"parent": "telefon"}).status_code == 400
+    assert client.put("/api/categories/kommunikation", json={"parent": "kommunikation"}).status_code == 400
 
 
 # 3. number ranges: "230, 240" -> two ranges, no empty or duplicate entries -----
@@ -112,38 +112,39 @@ def test_manual_assignment_applies_to_v1_and_v2(client):
 def test_ranges_50_60_in_two_categories(tmp_path):
     cats = {c["id"]: c["sheets"] for c in CompanyStore(tmp_path / "f.sqlite").categories()}
     for sheet in ("50", "60"):
-        assert sheet in cats["schalter"] and sheet in cats["steckdosen"]
+        assert sheet in cats["schalter-schalter"] and sheet in cats["steckdosen-steckdosen"]
 
 
 # Further Nova datasets (Niederspannung, Schwachstrom) ----------------------------
 
 def test_new_company_file_knows_extra_ranges(tmp_path):
     cats = {c["id"]: c["sheets"] for c in CompanyStore(tmp_path / "f.sqlite").categories()}
-    assert "BMA" in cats["bma"] and "S_P0" in cats["schalter"]
-    assert "S_KombGr1" in cats["schalter"] and "S_KombGr1" in cats["steckdosen"]
+    assert "BMA" in cats["bma"] and "S_P0" in cats["schalter-schalter"]
+    assert "S_KombGr1" in cats["schalter-schalter"] and "S_KombGr1" in cats["steckdosen-steckdosen"]
     assert "schema" in cats
 
 
-def test_existing_company_file_is_extended_once(tmp_path):
+def test_existing_company_file_gets_sections_and_groups_once(tmp_path):
     import json
     import sqlite3
     path = tmp_path / "f.sqlite"
     store = CompanyStore(path)
-    # Simulate an old file: no extra ranges, no schema category, version 1,
+    # Simulate an old file: Schalter holds its ranges itself, no groups, no schema,
     # and a user who put "BMA" into Diverse on purpose.
     con = sqlite3.connect(path)
-    for cid, sheets in con.execute("SELECT id, sheets FROM categories").fetchall():
-        from nova_legend.categories.defaults import EXTRA_SHEETS
-        keep = [s for s in json.loads(sheets) if s not in EXTRA_SHEETS.get(cid, [])]
-        con.execute("UPDATE categories SET sheets=? WHERE id=?", (json.dumps(keep), cid))
+    groups = [r[0] for r in con.execute("SELECT id FROM categories WHERE parent IS NOT NULL")]
+    con.execute(f"DELETE FROM categories WHERE id IN ({','.join('?' * len(groups))})", groups)
+    con.execute("UPDATE categories SET sheets=? WHERE id='schalter'", (json.dumps(["10", "20", "S_P0"]),))
+    con.execute("UPDATE categories SET sheets=? WHERE id='bma'", (json.dumps(["230", "240"]),))
     con.execute("UPDATE categories SET sheets=? WHERE id='diverse'", (json.dumps(["101", "BMA"]),))
     con.execute("DELETE FROM categories WHERE id='schema'")
     con.execute("DELETE FROM options WHERE key='defaults_version'")
     con.commit()
     con.close()
-    cats = {c["id"]: c["sheets"] for c in CompanyStore(path).categories()}
-    assert "S_P0" in cats["schalter"] and "schema" in cats
-    assert "BMA" not in cats["bma"] and "BMA" in cats["diverse"]   # user choice kept
+    cats = {c["id"]: c for c in CompanyStore(path).categories()}
+    assert cats["schalter-schalter"]["parent"] == "schalter" and "S_P0" in cats["schalter-schalter"]["sheets"]
+    assert "S_P0" not in cats["schalter"]["sheets"] and "schema" in cats
+    assert "BMA" not in cats["bma"]["sheets"] and "BMA" in cats["diverse"]["sheets"]   # user choice kept
     assert "version" not in " ".join(store.options())               # internal key hidden
 
 

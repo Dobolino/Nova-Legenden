@@ -72,6 +72,48 @@ LAYER_FILL = "var(--sym-layer, #b9c0c9)"   # layer colour next to explicit black
 BACKGROUND = "var(--sym-bg, #ffffff)"      # white masking areas
 
 
+def is_layer_grey(color: str | None) -> bool:
+    """A neutral grey in the Nova drawing. It follows the plan layer, like a part
+    without its own colour. Black stays black, white stays a mask, a real hue stays."""
+    if not color or len(color) != 7 or not color.startswith("#"):
+        return False
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        return False
+    if max(r, g, b) - min(r, g, b) > 24:
+        return False
+    if max(r, g, b) <= 48 or min(r, g, b) >= 242:
+        return False
+    return True
+
+
+def _explicit(color: str | None) -> bool:
+    """A colour the symbol chose itself. Grey and empty follow the plan layer."""
+    return bool(color) and not is_layer_grey(color)
+
+
+def _hue(color: str | None) -> bool:
+    """A real colour, not black, white or grey. Those follow the plan layer when
+    the whole symbol has no colour of its own."""
+    if not _explicit(color) or not color:
+        return False
+    low = color.lower()
+    if low in ("#000000", "#ffffff"):
+        return False
+    try:
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    except ValueError:
+        return False
+    return max(r, g, b) - min(r, g, b) > 24 or (max(r, g, b) > 48 and min(r, g, b) < 242)
+
+
+def is_soft(p, mixed: bool) -> bool:
+    """A soft fill: a hatch, or an area without own colour next to coloured lines
+    (drawn as a light tone). Everything else that is filled is a solid fill."""
+    return p.kind == "hatch" or (bool(p.filled) and mixed and not _explicit(p.color))
+
+
 def has_fill(geo: SymbolGeometry) -> bool:
     """True if the symbol has filled areas or hatches (the fill can be hidden)."""
     return any(p.filled for p in geo.primitives)
@@ -94,45 +136,71 @@ def _paint(color: str | None, mixed: bool) -> str:
     return color
 
 
-# Legend: the colours of the Nova drawing, never the section colour.
+# Legend colours. As in Nova, a part without its own colour is drawn in the colour of
+# its layer: in the legend the colour of the section (plan colour of the category's
+# layer). An explicit colour of the symbol stays, black included.
 OWN_BLACK = "#000000"
-OWN_LAYER_FILL = "#b9c0c9"   # area without own colour next to explicitly coloured parts
+LAYER_TINT = 0.45            # an area without own colour next to coloured lines: lighter layer colour
 
 
-def own_paint(color: str | None, mixed: bool, filled: bool) -> str:
-    """Hex colour of a primitive in the legend (preview and DXF export).
+def _tint(color: str, share: float) -> str:
+    r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+    return "#%02x%02x%02x" % tuple(round(c + (255 - c) * share) for c in (r, g, b))
 
-    An explicit colour stays. A part without own colour is black; only an area
-    without own colour in a symbol that also has coloured parts (black lines on
-    a coloured area) gets a light grey, so the black lines on it stay visible.
+
+def own_paint(color: str | None, mixed: bool, filled: bool, layer: str = OWN_BLACK,
+              monochrome: bool = False) -> str:
+    """Hex colour of a primitive in the legend (DXF export).
+
+    An explicit hue stays. A part without own colour, a neutral grey, and every
+    part of a symbol that has no hue of its own, take ``layer``. White stays a
+    mask. An area without own colour next to a coloured line takes a lighter
+    tone, so the line on it stays visible.
     """
-    if color:
+    if color and color.lower() == "#ffffff":
         return color
-    return OWN_LAYER_FILL if (mixed and filled) else OWN_BLACK
+    # black stays black next to a real colour; a symbol without any hue takes the plan colour
+    if monochrome or not _explicit(color):
+        return _tint(layer, LAYER_TINT) if (mixed and filled and not monochrome) else layer
+    return color
 
 
 def is_mixed(geo: SymbolGeometry) -> bool:
-    return any(p.color for p in geo.primitives) and any(p.color is None for p in geo.primitives)
+    return any(_explicit(p.color) for p in geo.primitives) and any(not _explicit(p.color) for p in geo.primitives)
 
 
 def render_svg(geo: SymbolGeometry, size_px: int | None = 96, show_points: bool = True,
                stroke_mm: float = 0.18, title: str | None = None, show_fill: bool = True,
-               own_colors: bool = False) -> str:
+               own_colors: bool = False, show_soft: bool | None = None,
+               force_color: bool = False) -> str:
+    """``show_fill`` False hides the fills; with ``show_soft`` given, it decides on its
+    own for hatches and light areas and ``show_fill`` only for solid fills."""
+    soft_shown = show_fill if show_soft is None else show_soft
     x0, y0, x1, y1 = geometry_bounds(geo)   # full symbol, also when the fill is hidden
     pad = max(x1 - x0, y1 - y0, 0.002) * 0.12
     x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
     w, h = (x1 - x0) * MM, (y1 - y0) * MM
     # Large symbols (e.g. an 11 m PV array at 1:50) keep visible lines
     stroke_mm = max(stroke_mm, 0.012 * max(w, h))
-    mixed = is_mixed(geo)
+    # force_color: one colour for the whole symbol (the section colour, or a chosen one).
+    # White stays a mask. Otherwise a real hue in the drawing stays.
+    mixed = False if force_color else is_mixed(geo)
+    monochrome = force_color or not any(_hue(p.color) for p in geo.primitives)
     parts: list[str] = []
     for p in geo.primitives:
-        if p.filled and not show_fill:
+        if p.filled and not (soft_shown if is_soft(p, mixed) else show_fill):
             continue
         d = p.data
         if own_colors:
-            paint = own_paint(p.color, mixed, p.filled)
-            line = own_paint(p.color, mixed, False)
+            # explicit colours as hex; parts without own colour follow the page:
+            # currentColor = section colour, --sym-layer = its lighter tone
+            if p.color and p.color.lower() == "#ffffff":
+                paint = line = BACKGROUND
+            elif monochrome or not _explicit(p.color):
+                line = "currentColor"
+                paint = "var(--sym-layer, #b9c0c9)" if (mixed and p.filled and not monochrome) else "currentColor"
+            else:
+                paint = line = p.color
             stroke = f' stroke="{line}"'
         else:
             paint = _paint(p.color, mixed)

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, Category, Options, setDatasetNames, Status, UpdateInfo } from "./api";
 import Library from "./components/Library";
 import Categories from "./components/Categories";
@@ -10,6 +10,8 @@ import { NavigationProvider, useNavigation } from "./Navigation";
 import { Icon } from "./components/Icons";
 import Menu from "./components/Menu";
 import edecoLogo from "./assets/edeco-logo.svg?raw";
+import Minesweeper from "./components/Minesweeper";
+import UpdateDialog, { type UpdatePhase } from "./components/UpdateDialog";
 
 type Tab = "projects" | "library" | "categories" | "settings" | "help";
 
@@ -40,6 +42,10 @@ function AppContent() {
   const [revision, setRevision] = useState(0); // bumps when library data changes
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [installing, setInstalling] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>("ready");
+  const [updateError, setUpdateError] = useState("");
   const [theme, setThemeState] = useState<ThemeMode>(loadTheme);
   const setTheme = useCallback((mode: ThemeMode) => {
     applyTheme(mode);
@@ -84,20 +90,41 @@ function AppContent() {
     api.updateCheck().then(setUpdate).catch(() => undefined);
   }, []);
 
-  /** Same as «Jetzt aktualisieren» in the settings: confirm, download, check, silent setup, restart. */
-  async function installUpdate() {
-    if (!update) return;
-    if (!update.can_install) {
-      notify(update.message || "Das Update läuft nur im installierten Windows-Programm.");
-      return;
+  /** Click on the program version: ask again and show the result in the update window. */
+  async function checkForUpdate() {
+    setUpdateOpen(true);
+    setUpdatePhase("checking");
+    setUpdateError("");
+    setChecking(true);
+    try {
+      const u = await api.updateCheck();
+      setUpdate(u);
+      setUpdatePhase("ready");
+    } catch (e) {
+      setUpdateError((e as Error).message);
+      setUpdatePhase("ready");
+    } finally {
+      setChecking(false);
     }
-    if (!window.confirm(`Update ${update.latest} jetzt installieren? Das Programm schliesst sich und startet danach neu.`)) return;
+  }
+
+  function showUpdate() {
+    setUpdateError("");
+    setUpdatePhase("ready");
+    setUpdateOpen(true);
+  }
+
+  /** Download, check, silent setup, restart. The window itself is the confirmation. */
+  async function installUpdate() {
+    if (!update?.can_install) return;
+    setUpdateOpen(true);
+    setUpdatePhase("installing");
     setInstalling(true);
     try {
-      const r = await api.updateInstall();
-      notify(r.message);
+      await api.updateInstall();
     } catch (e) {
-      notify((e as Error).message, true);
+      setUpdateError((e as Error).message);
+      setUpdatePhase("ready");
       setInstalling(false);
     }
   }
@@ -105,6 +132,23 @@ function AppContent() {
   const noDatasets = status && status.datasets.length === 0;
   const dataWarning = noDatasets || Boolean(status && (status.company_error || !status.settings.company_folder));
   const current = NAVIGATION.find((item) => item.id === tab)!;
+  const [mineOpen, setMineOpen] = useState(false);
+  const secretClicks = useRef<number[]>([]);
+  const secret = () => {
+    const now = Date.now();
+    secretClicks.current = [...secretClicks.current.filter((t) => now - t < 4000), now];
+    if (secretClicks.current.length >= 5) {
+      secretClicks.current = [];
+      setMineOpen(true);
+    }
+  };
+
+  // the legend editor asks for the settings (e.g. to choose the general part)
+  useEffect(() => {
+    const open = () => navigate(() => setTab("settings"));
+    window.addEventListener("nl:open-settings", open);
+    return () => window.removeEventListener("nl:open-settings", open);
+  }, [navigate]);
 
   return (
     <div className="app" inert={pending}>
@@ -114,6 +158,7 @@ function AppContent() {
             className="brand-logo"
             role="img"
             aria-label="edeco ag"
+            onClick={secret}
             dangerouslySetInnerHTML={{ __html: edecoLogo.replace(/<\?xml[^?]*\?>/, "") }}
           />
           <div className="brand-name">NOVA<span>Legenden</span></div>
@@ -134,10 +179,20 @@ function AppContent() {
         </nav>
         <div className="nav-footer">
           <span className="nav-footer-label">NOVA-Legenden</span>
+          {status?.version_label && (
+            <button
+              type="button"
+              className="nav-version"
+              onClick={checkForUpdate}
+              disabled={checking}
+              title="Nach Updates suchen"
+            >
+              {checking ? "Suche …" : status.version_label}
+            </button>
+          )}
           <span>Elektroplanung</span>
-          <span>edeco ag</span>
           <span className="nav-copy">
-            <span>© 2026 edeco ag</span>
+            <button type="button" className="nav-secret" onClick={secret}>© 2026 edeco ag</button>
             <span>Alle Rechte vorbehalten.</span>
           </span>
           <span className="powered">Powered by Trimble Nova</span>
@@ -174,8 +229,8 @@ function AppContent() {
                 <button
                   className="chip update"
                   disabled={installing}
-                  onClick={() => installUpdate()}
-                  title={update.can_install ? "Update jetzt installieren" : "Update läuft nur im installierten Programm"}
+                  onClick={showUpdate}
+                  title="Update ansehen"
                 >
                   {installing ? "Update läuft …" : `Update ${update.latest} verfügbar`}
                 </button>
@@ -211,7 +266,9 @@ function AppContent() {
             <SettingsPage
               status={status}
               update={update}
-              onUpdate={setUpdate}
+              onCheckUpdate={checkForUpdate}
+              onShowUpdate={showUpdate}
+              checking={checking}
               notify={notify}
               onChanged={reload}
               theme={theme}
@@ -221,6 +278,17 @@ function AppContent() {
         </div>
       </div>
       {toast && <div className={`toast ${toast.error ? "error" : ""}`} role={toast.error ? "alert" : "status"}>{toast.text}</div>}
+      {mineOpen && <Minesweeper onClose={() => setMineOpen(false)} />}
+      {updateOpen && (
+        <UpdateDialog
+          phase={updatePhase}
+          info={update}
+          error={updateError}
+          onClose={() => setUpdateOpen(false)}
+          onInstall={installUpdate}
+          onRetry={checkForUpdate}
+        />
+      )}
     </div>
   );
 }

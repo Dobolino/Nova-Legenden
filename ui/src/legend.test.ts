@@ -22,6 +22,7 @@ import {
   moveItemTo,
   moveItemToBlock,
   normText,
+  placeInCell,
   push,
   redo,
   removeItem,
@@ -37,7 +38,7 @@ import type { LegendDoc } from "./legend.ts";
 const style = {
   font: "Arial", text_size: 2.5, symbol_scale: 1, grid: "standard", row: 4.55, text_offset: 9.75,
   columns: 2, width: 200, margin: 5, plan_scale: 50, section_gap: 0, entry_gap: 0, text_lines: 0,
-  strip_fill: false, frame_on: false, frame: "#000000",
+  hatch_off: false, fill_off: false, frame_on: false, frame: "#000000",
 };
 
 function item(id: string, family: string | null) {
@@ -107,7 +108,7 @@ test("new entries and sections, company text wins over the library name", () => 
   const s = nb.doc.blocks[2].style;
   assert.equal(s.header, "#e03131");
   assert.equal(s.header_text, "#ffffff");
-  assert.equal(s.symbol, "#000000", "symbols keep their own colours");
+  assert.equal(s.symbol, "#e03131", "parts without own colour take the layer colour");
   assert.equal(s.background_on, false);
   assert.equal(s.border_on, false);
   assert.equal(describe("lampe", "Lampe", { lampe: "Decken- / Wandlampenstelle" }), "Decken- / Wandlampenstelle");
@@ -137,11 +138,20 @@ test("drag and drop: move in front of an entry, into another section, insert new
   const r = insertItem(doc(), "b", { kind: "symbol", family_key: "neu", symbol_key: "s:neu", text: "Neu" }, "i3");
   assert.deepEqual(r.doc.blocks[1].items.map((i) => i.id), [r.id, "i3"]);
   assert.equal(rotateItem(rotateItem(doc(), "a", "i1"), "a", "i1").blocks[0].items[0].rotation, 180);
+  assert.equal(rotateItem(doc(), "a", "i1", 45).blocks[0].items[0].rotation, 45);
 });
 
-test("duplicates are marked, the first one is not", () => {
-  const r = insertItem(doc(), "b", { kind: "symbol", family_key: "lampe", symbol_key: "s:lampe", text: "Lampe 2" }, null);
+test("the same symbol in two plan colours is not a duplicate", () => {
+  const blue = addItem(doc(), "b", { kind: "symbol", family_key: "dose", symbol_key: "s:dose", text: "Dose", color: "#0000ff" });
+  const both = addItem(blue.doc, "b", { kind: "symbol", family_key: "dose", symbol_key: "s:dose", text: "Dose", color: "#ff0000" });
+  assert.deepEqual([...duplicateItems(both.doc)], []);
+});
+
+test("duplicates in one section are marked, the first one and other sections are not", () => {
+  const r = insertItem(doc(), "a", { kind: "symbol", family_key: "lampe", symbol_key: "s:lampe", text: "Lampe 2" }, null);
   assert.deepEqual([...duplicateItems(r.doc)], [r.id]);
+  const other = insertItem(doc(), "b", { kind: "symbol", family_key: "lampe", symbol_key: "s:lampe", text: "Lampe BMA" }, null);
+  assert.deepEqual([...duplicateItems(other.doc)], [], "same symbol in another section is intended");
   assert.equal(inLegend(doc(), "lampe", null), true);
   assert.equal(inLegend(doc(), "neu", null), false);
 });
@@ -163,4 +173,24 @@ test("the general part: same text rule as the backend, hidden not deleted", () =
   ];
   assert.deepEqual(missingRows(d, rows, new Set(["neu"])).map((r) => r.family_key), ["melder"]);
   assert.deepEqual(coveredRows(rows, new Set(["neu"])).map((r) => r.family_key), ["neu"]);
+});
+
+
+test("cells: an occupied cell makes room, an empty cell keeps the others in place", () => {
+  const six = { ...doc(), blocks: [{ ...doc().blocks[0], items: ["a1", "a2", "a3", "b1", "b2", "b3", "c1"].map((id) => item(id, id)) }, doc().blocks[1]] };
+  const ids = (d: LegendDoc, b = 0) => d.blocks[b].items.map((it) => (it.kind === "gap" ? "_" : it.id));
+  // 3 columns of 3: c1 to the bottom of the third column (cell 8), cells 6 and 7 stay empty
+  const bottom = placeInCell(six, "a", 8, { block: "a", item: "c1" });
+  assert.deepEqual(ids(bottom), ["a1", "a2", "a3", "b1", "b2", "b3", "_", "_", "c1"]);
+  // phone-like: a1 onto b2 (cell 4), the entries in between move up by one
+  assert.deepEqual(ids(placeInCell(six, "a", 4, { block: "a", item: "a1" })), ["a2", "a3", "b1", "b2", "a1", "b3", "c1"]);
+  // a new entry onto an occupied cell pushes the others on, up to the next empty cell
+  const added = placeInCell(bottom, "a", 1, { item: item("n", "n") });
+  assert.deepEqual(ids(added), ["a1", "n", "a2", "a3", "b1", "b2", "b3", "_", "c1"]);
+  // from another section: the source closes up, the empty cells at its end go
+  const moved = placeInCell(bottom, "b", 0, { block: "a", item: "c1" });
+  assert.deepEqual(ids(moved), ["a1", "a2", "a3", "b1", "b2", "b3"]);
+  assert.deepEqual(ids(moved, 1), ["c1", "i3"]);
+  // onto its own cell: nothing changes
+  assert.equal(placeInCell(six, "a", 6, { block: "a", item: "c1" }), six);
 });

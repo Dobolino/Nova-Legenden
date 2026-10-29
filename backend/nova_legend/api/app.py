@@ -74,6 +74,7 @@ class SettingsIn(BaseModel):
     nova_version: str | None = None
     oda_path: str | None = None
     update_channel: Literal["stable", "test"] | None = None
+    stencil_folder: str | None = None
 
 
 class CategoryIn(BaseModel):
@@ -84,6 +85,20 @@ class CategoryIn(BaseModel):
     spacing: float | None = None
     hidden: bool | None = None
     sheets: list[str] | None = None
+
+
+class ColorIn(BaseModel):
+    color: str | None = None
+
+
+class MergeIn(BaseModel):
+    source: str
+    target: str
+
+
+class FamilyCategoriesIn(BaseModel):
+    family_key: str
+    categories: list[str] | None = None
 
 
 class AssignIn(BaseModel):
@@ -107,6 +122,14 @@ class ThemeIn(BaseModel):
 
 
 # -- app factory -----------------------------------------------------------------
+
+def lineage(cat_id: str, parents: dict) -> list[str]:
+    """A category and its parents up to the section."""
+    out = [cat_id]
+    while parents.get(out[-1]) and parents[out[-1]] not in out:
+        out.append(parents[out[-1]])
+    return out
+
 
 def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> FastAPI:
     app = FastAPI(title="NOVA-Legenden", version=config.APP_VERSION)
@@ -158,6 +181,7 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
             "oda": st.settings.oda_path or config.find_oda_converter(),
             "local_home": str(config.local_home()),
             "dialogs": dialogs.available(),
+            "is_admin": st.company.is_legend_admin(config.current_user()),
         }
 
     @app.post("/api/dialog/{kind}")
@@ -175,6 +199,8 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
 
     @app.put("/api/settings")
     def put_settings(body: SettingsIn) -> dict:
+        if body.update_channel is not None and not st.company.is_legend_admin(config.current_user()):
+            raise HTTPException(403, "Nur Admins dürfen den Update-Kanal ändern.")
         st.apply_settings(body.model_dump())
         return status()
 
@@ -202,13 +228,19 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
 
     # -- program update ------------------------------------------------------------
 
+    def update_channel() -> str:
+        """Test builds only for an admin. Everyone else stays on released versions."""
+        if st.settings.update_channel == "test" and st.company.is_legend_admin(config.current_user()):
+            return "test"
+        return "stable"
+
     @app.get("/api/update/check")
     def update_check() -> dict:
-        return updater.check(channel=st.settings.update_channel).to_dict()
+        return updater.check(channel=update_channel()).to_dict()
 
     @app.post("/api/update/install")
     def update_install() -> dict:
-        info = updater.check(channel=st.settings.update_channel)
+        info = updater.check(channel=update_channel())
         if not info.available:
             raise HTTPException(400, info.message or "Kein Update verfügbar")
         if not info.can_install:
@@ -240,13 +272,15 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
         fills = st.company.fill_settings()
         fams = st.library.families(st.family_options())
         words = [w for w in q.lower().split() if w]
+        parents = {c["id"]: c.get("parent") for c in categories}
         items = []
         for fam_id, fam in fams.items():
             rep = fam.representative
             if dataset and rep.dataset != dataset:
                 continue
             entry = family_entry(fam_id, fam, categories, assignments, fills)
-            if category and category not in entry["categories"]:
+            # a section also lists the symbols of its groups
+            if category and category not in {a for c in entry["categories"] for a in lineage(c, parents)}:
                 continue
             members = fam.members if all_variants else [rep]
             for sym in members:
@@ -326,11 +360,13 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
         dataset is counted, so the numbers match the visible tiles."""
         cats = st.company.categories()
         assignments = st.company.assignments()
+        parents = {c["id"]: c.get("parent") for c in cats}
         counts = {c["id"]: 0 for c in cats}
         for fam in st.library.families(st.family_options()).values():
             if dataset and fam.representative.dataset != dataset:
                 continue
-            for cid in family_categories(fam, cats, assignments)[0]:
+            # a section counts the families of its groups too (once)
+            for cid in {a for c in family_categories(fam, cats, assignments)[0] for a in lineage(c, parents)}:
                 if cid in counts:
                     counts[cid] += 1
         for c in cats:
@@ -373,6 +409,57 @@ def create_app(state: AppState | None = None, ui_dir: Path | None = None) -> Fas
     @app.post("/api/categories/reset")
     def reset() -> dict:
         return {"items": st.company.reset_defaults()}
+
+    @app.put("/api/categories/{cat_id}/color")
+    def category_color(cat_id: str, body: ColorIn) -> dict:
+        if cat_id not in {c["id"] for c in st.company.categories()}:
+            raise HTTPException(404, "Kategorie nicht gefunden")
+        try:
+            st.company.set_category_color(cat_id, body.color)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"items": st.company.categories()}
+
+    @app.get("/api/categories/check")
+    def check_categories() -> dict:
+        return {"items": st.company.check_categories()}
+
+    @app.post("/api/categories/merge")
+    def merge_categories(body: MergeIn) -> dict:
+        try:
+            st.company.merge_categories(body.source, body.target)
+        except KeyError:
+            raise HTTPException(404, "Kategorie nicht gefunden") from None
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        return {"items": st.company.categories()}
+
+    def family_by_key(key: str):
+        for fam in st.library.families(st.family_options()).values():
+            if fam.key == key:
+                return fam
+        return None
+
+    @app.get("/api/category-family")
+    def family_categories_get(family_key: str) -> dict:
+        """Categories of a symbol family, company-wide (from the legend editor)."""
+        cats = st.company.categories()
+        fam = family_by_key(family_key)
+        manual = st.company.assignments().get(family_key)
+        if fam is not None:
+            ids, source = family_categories(fam, cats, st.company.assignments())
+        else:
+            ids, source = list(manual or []), ("manuell" if manual else "keine")
+        return {"family_key": family_key, "categories": ids, "source": source}
+
+    @app.put("/api/category-family")
+    def family_categories_put(body: FamilyCategoriesIn) -> dict:
+        known = {c["id"] for c in st.company.categories()}
+        unknown = [c for c in (body.categories or []) if c not in known]
+        if unknown:
+            raise HTTPException(400, f"Unbekannte Kategorie: {', '.join(unknown)}")
+        st.company.assign(body.family_key, body.categories)
+        return family_categories_get(body.family_key)
 
     from .projects import register as register_projects
     register_projects(app, st)

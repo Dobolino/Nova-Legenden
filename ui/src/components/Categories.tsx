@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, Category, Options } from "../api";
+import { api, Category, FamilyItem, Options } from "../api";
 import { CategoryDraft, draftOf, draftPatch, isDirty } from "../uiState";
 import { useNavigation, useUnsavedDraft } from "../Navigation";
+import Desc from "./Desc";
 
 interface Props {
   categories: Category[];
@@ -45,6 +46,8 @@ export default function Categories({ categories, options, notify, onChanged }: P
   const [newTitle, setNewTitle] = useState("");
   const [newParent, setNewParent] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mergeInto, setMergeInto] = useState("");
+  const [hints, setHints] = useState<{ kind: string; text: string; ids: string[] }[] | null>(null);
 
   const byId = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c])), [categories]);
   const tops = categories.filter((c) => !c.parent);
@@ -139,11 +142,7 @@ export default function Categories({ categories, options, notify, onChanged }: P
         <div className="split">
           <div className="card">
             <h3>Kategorien der Firma</h3>
-            <p className="desc">
-              Zeile anklicken zum Bearbeiten. Reihenfolge: am Griff ⠿ ziehen oder im Bearbeitungsbereich mit «Nach
-              oben» und «Nach unten». Nummernkreise ordnen Symbole automatisch zu (z. B. 230, 240 für
-              Brandmeldeanlage).
-            </p>
+            <Desc short="Zeile anklicken zum Bearbeiten." more="Reihenfolge: am Griff ⠿ ziehen oder im Bearbeitungsbereich mit «Nach oben» und «Nach unten». Nummernkreise ordnen Symbole automatisch zu (z. B. 230, 240 für Brandmeldeanlage)." />
             <div className="table-scroll">
               <table className="cat-table">
                 <colgroup>
@@ -200,6 +199,7 @@ export default function Categories({ categories, options, notify, onChanged }: P
                         </span>
                       </td>
                       <td className="wrap" style={{ paddingLeft: c.parent ? 24 : 6 }}>
+                        {c.color && <span className="swatch" style={{ background: c.color, width: 12, height: 12, marginRight: 6 }} title={`Firmenfarbe ${c.color}`} />}
                         <b>{c.title}</b>
                         {c.hidden && <span className="badge" style={{ marginLeft: 6 }}>ausgeblendet</span>}
                       </td>
@@ -339,10 +339,69 @@ export default function Categories({ categories, options, notify, onChanged }: P
                   </button>
                 </div>
                 <p className="hint">{current.family_count ?? 0} Symbolfamilien in dieser Kategorie.</p>
+                <div className="section">Farbe in der Legende</div>
+                <div className="row">
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(current.color)}
+                      disabled={busy}
+                      onChange={(e) =>
+                        run(() => api.setCategoryColor(current.id, e.target.checked ? "#808080" : ""),
+                          e.target.checked ? "Feste Farbe gesetzt" : "Farbe kommt wieder aus dem Plan")
+                      }
+                    />
+                    Feste Firmenfarbe
+                  </label>
+                  {current.color && (
+                    <input
+                      type="color"
+                      aria-label="Firmenfarbe der Kategorie"
+                      value={current.color}
+                      disabled={busy}
+                      onChange={(e) => run(() => api.setCategoryColor(current.id, e.target.value), "Farbe gespeichert")}
+                    />
+                  )}
+                </div>
+                <p className="hint">
+                  {current.color
+                    ? "Diese Farbe gilt in jedem Projekt, unabhängig von der Planebene."
+                    : "Ohne feste Farbe nimmt die Legende die Farbe der Planebene."}
+                </p>
+                <div className="section">Zusammenführen</div>
+                <div className="row">
+                  <select className="select" value={mergeInto} onChange={(e) => setMergeInto(e.target.value)}
+                    aria-label="Zielkategorie">
+                    <option value="">Zielkategorie wählen…</option>
+                    {categories.filter((c) => c.id !== current.id).map((c) => (
+                      <option key={c.id} value={c.id}>{c.parent ? `${byId[c.parent]?.title ?? ""} › ` : ""}{c.title}</option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn small"
+                    disabled={busy || !mergeInto}
+                    onClick={() => {
+                      const target = byId[mergeInto];
+                      if (!target) return;
+                      if (!window.confirm(`«${current.title}» in «${target.title}» zusammenführen? Nummernkreise, Symbolzuordnungen und Unterkategorien gehen nach «${target.title}», «${current.title}» wird gelöscht. Das gilt für die ganze Firma.`)) return;
+                      run(() => api.mergeCategories(current.id, target.id), "Zusammengeführt").then((ok) => {
+                        if (ok) {
+                          setMergeInto("");
+                          setSelected(target.id);
+                          setDraft(draftOf(target));
+                        }
+                      });
+                    }}
+                  >
+                    Zusammenführen
+                  </button>
+                </div>
               </>
             )}
           </div>
         </div>
+
+        <UnassignedCard categories={categories} notify={notify} onChanged={onChanged} />
 
         <div className="card">
           <h3>Regeln für Symbolfamilien und Legende</h3>
@@ -363,6 +422,13 @@ export default function Categories({ categories, options, notify, onChanged }: P
           ))}
           <div className="row" style={{ marginTop: 12 }}>
             <button
+              className="btn"
+              disabled={busy}
+              onClick={() => api.checkCategories().then((r) => setHints(r.items), (e) => notify((e as Error).message, true))}
+            >
+              Kategorien prüfen
+            </button>
+            <button
               className="btn danger"
               disabled={busy}
               onClick={() => {
@@ -377,8 +443,101 @@ export default function Categories({ categories, options, notify, onChanged }: P
               Kategorien auf Standard zurücksetzen
             </button>
           </div>
+          {hints && (
+            <div className="category-hints">
+              {hints.length === 0 ? (
+                <p className="hint">Keine Auffälligkeiten: keine doppelten Namen, keine doppelten Legendenebenen, keine leeren Kategorien.</p>
+              ) : (
+                <ul>
+                  {hints.map((h, i) => (
+                    <li key={i}>
+                      {h.text}{" "}
+                      {h.ids.map((id) => byId[id] && (
+                        <button key={id} className="btn small" onClick={() => select(id)}>{byId[id].title} öffnen</button>
+                      ))}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Symbol families no rule places (they would land in «Diverse»): an admin sorts them once,
+ *  the choice applies in every project. */
+function UnassignedCard({ categories, notify, onChanged }: {
+  categories: Category[];
+  notify: (text: string, error?: boolean) => void;
+  onChanged: () => void;
+}) {
+  const [items, setItems] = useState<FamilyItem[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      const r = await api.families({ q: "", category: "", dataset: "", mounting: "", all_variants: false });
+      setItems(r.items.filter((f) => f.category_source === "keine Regel"));
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const byId = Object.fromEntries(categories.map((c) => [c.id, c]));
+  const options = categories.filter((c) => c.id !== "diverse");
+
+  async function assign(f: FamilyItem, cat: string) {
+    if (!cat) return;
+    setBusy(true);
+    try {
+      await api.assign(f.id, [cat]);
+      setItems((list) => (list ?? []).filter((x) => x.id !== f.id));
+      notify(`«${f.title}» gehört jetzt zu «${byId[cat]?.title ?? cat}» (gilt für die ganze Firma)`);
+      onChanged();
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3>Nicht zugeordnet {items ? <span className="badge">{items.length}</span> : null}</h3>
+      <Desc short="Symbole, die kein Nummernkreis und keine Namensregel einordnet." more="In der Legende landen sie in «Diverse». Ordne sie einmal einem Abschnitt oder einer Gruppe zu, dann gilt das in allen Projekten." />
+      {items && !items.length && <p className="hint">Alle Symbole sind zugeordnet.</p>}
+      {items && items.length > 0 && (
+        <div className="table-scroll" style={{ maxHeight: 360 }}>
+          <table className="list-table">
+            <thead><tr><th>Symbol</th><th>Katalog</th><th>Zuordnen</th></tr></thead>
+            <tbody>
+              {items.map((f) => (
+                <tr key={f.id}>
+                  <td className="wrap"><b>{f.title}</b></td>
+                  <td className="hint">{f.representative.sheet} · {f.representative.item}</td>
+                  <td>
+                    <select className="select" disabled={busy} value="" aria-label={`${f.title} zuordnen`}
+                      onChange={(e) => assign(f, e.target.value)}>
+                      <option value="">wählen…</option>
+                      {options.map((c) => (
+                        <option key={c.id} value={c.id}>{c.parent ? `${byId[c.parent]?.title ?? ""} › ` : ""}{c.title}</option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

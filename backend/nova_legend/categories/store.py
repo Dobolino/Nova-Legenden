@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterator
 
 from ..config import current_user
-from .defaults import DATASET_RULES, DEFAULT_CATEGORIES, EXTRA_SHEETS, NAME_RULES
+from .defaults import DATASET_RULES, DEFAULT_CATEGORIES, NAME_FIRST, NAME_RULES, group_by_name
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS categories (
@@ -60,13 +60,30 @@ LEGEND_DEFAULTS = {
     "legend_admins": [],           # Windows user names allowed to change these settings
     "legend_text_size": 2.5,       # mm, one size for all legend texts
     "legend_symbol_scale": 1.0,    # one scale for all symbols
+    "legend_hatch_off": False,     # new legends: no hatches and light areas in symbols
+    "legend_fill_off": False,      # new legends: no solid fills in symbols
+    # changes to the rows of the general part, by normalised row text: the drawing on the
+    # server stays the source, these are kept beside it ({text, hidden, links, by, at})
+    "legend_general_rows": {},
+    # rows added from the symbol library ({id, text, symbol_key, family_key, after}) and
+    # the order of all rows (row keys); both kept beside the server drawing
+    "legend_general_extra": [],
+    "legend_general_order": [],
+    # company symbols: how a symbol family looks in every legend
+    # ({family_key: {symbol_factor, rotation, mirror, parts: [{family_key, symbol_factor,
+    # rotation, mirror}], by, at}}); text and section live in descriptions / assignments
+    "legend_company_symbols": {},
 }
 
 # Bump when default categories gain number ranges; existing company files
 # are extended once (only ranges that are not assigned anywhere yet).
-DEFAULTS_VERSION = 2
+DEFAULTS_VERSION = 5
 
 CATEGORY_FIELDS = ("title", "parent", "layer", "columns", "spacing", "hidden", "sheets")
+# Company colour of a category: fixed for all projects, wins over the plan colour.
+# «Allgemein» is grey unless someone chooses otherwise ("" = take the plan colour).
+DEFAULT_CATEGORY_COLORS = {"allgemein": "#808080"}
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 def normalize_sheets(values: list[str] | str) -> list[str]:
@@ -129,37 +146,55 @@ class CompanyStore:
         version = json.loads(row["value"]) if row else 1
         if version >= DEFAULTS_VERSION:
             return
-        rows = {r["id"]: json.loads(r["sheets"] or "[]")
-                for r in con.execute("SELECT id, sheets FROM categories")}
-        used = {s for sheets in rows.values() for s in sheets}
-        counts: dict[str, int] = {}
-        for extra in EXTRA_SHEETS.values():
-            for sheet in extra:
-                counts[sheet] = counts.get(sheet, 0) + 1
-        shared = {sheet for sheet, n in counts.items() if n > 1}
-        added = []
-        for cat_id, extra in EXTRA_SHEETS.items():
-            if cat_id not in rows:
-                continue
-            # A range may be added if nobody uses it yet, or if the defaults
-            # themselves put it into several categories (e.g. S_KombGr1).
-            new = [s for s in extra if s not in rows[cat_id]
-                   and (s not in used or s in shared)]
-            if new:
-                rows[cat_id] += new
-                used.update(new)
-                con.execute("UPDATE categories SET sheets=? WHERE id=?",
-                            (json.dumps(rows[cat_id]), cat_id))
-                added.append(f"{cat_id}: {', '.join(new)}")
-        if "schema" not in rows:
-            schema = next(c for c in DEFAULT_CATEGORIES if c.id == "schema")
-            sort = con.execute("SELECT COALESCE(MAX(sort), 0) + 1 FROM categories").fetchone()[0]
-            con.execute("INSERT INTO categories VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (schema.id, schema.title, None, schema.layer, schema.columns,
-                         schema.spacing_mm, sort, 0, "[]", "system", _now()))
-            added.append("neue Kategorie schema")
+        done = self._restructure(con)
         self._set_defaults_version(con)
-        self._log(con, "migrate", f"Standard v{DEFAULTS_VERSION}: " + "; ".join(added))
+        self._log(con, "migrate", f"Standard v{DEFAULTS_VERSION}: " + "; ".join(done))
+
+    def _restructure(self, con) -> list[str]:
+        """Bring an older company file to the sections and groups of the defaults
+        (version 5). Missing categories are added, the groups go under their section and
+        take their number ranges from the section. Titles a company changed, its own
+        categories and its manual assignments stay as they are."""
+        done: list[str] = []
+        rows = {r["id"]: dict(r) for r in con.execute("SELECT * FROM categories")}
+        defaults = {c.id: c for c in DEFAULT_CATEGORIES}
+        old_titles = {"edv": "EDV und UKV", "fluchtweg": "Fluchtwegleuchten"}
+        sort = max([r["sort"] for r in rows.values()] or [0])
+        for cat in DEFAULT_CATEGORIES:
+            if cat.id in rows:
+                continue
+            # a group takes the place of its section in the order
+            near = rows.get(cat.parent or "") or {}
+            sort += 1
+            con.execute("INSERT INTO categories VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (cat.id, cat.title, None, cat.layer, cat.columns, cat.spacing_mm,
+                         near.get("sort", sort), 0, "[]", "system", _now()))
+            rows[cat.id] = {"id": cat.id, "title": cat.title, "parent": None, "sheets": "[]", "sort": sort}
+            done.append(f"neu {cat.id}")
+        sheets = {cid: json.loads(r["sheets"] or "[]") for cid, r in rows.items()}
+        for cat in DEFAULT_CATEGORIES:
+            row = rows[cat.id]
+            if row.get("parent") != cat.parent:
+                con.execute("UPDATE categories SET parent=? WHERE id=?", (cat.parent, cat.id))
+                done.append(f"{cat.id} unter {cat.parent or 'Hauptebene'}")
+            if old_titles.get(cat.id) and row.get("title") == old_titles[cat.id]:
+                con.execute("UPDATE categories SET title=? WHERE id=?", (cat.title, cat.id))
+            if not cat.parent:
+                continue
+            # number ranges of the group: from its section (or a merged sibling) into the group
+            for sheet in cat.sheets:
+                for cid, own in sheets.items():
+                    if cid == cat.id or sheet not in own:
+                        continue
+                    if defaults.get(cid) and sheet in defaults[cid].sheets:
+                        continue          # the defaults keep it there too (S_KombGr1)
+                    own.remove(sheet)
+                if sheet not in sheets[cat.id]:
+                    sheets[cat.id].append(sheet)
+        for cid, own in sheets.items():
+            if own != json.loads(rows[cid]["sheets"] or "[]"):
+                con.execute("UPDATE categories SET sheets=? WHERE id=?", (json.dumps(own), cid))
+        return done
 
     # -- options ---------------------------------------------------------------
 
@@ -186,6 +221,13 @@ class CompanyStore:
         out["legend_admins"] = [str(a) for a in out["legend_admins"] if str(a).strip()]
         return out
 
+    def is_legend_admin(self, user: str) -> bool:
+        """Empty list: still open, everyone may change company settings. Afterwards only the named users."""
+        admins = self.legend_settings()["legend_admins"]
+        if not admins:
+            return True
+        return user.lower() in {a.lower() for a in admins}
+
     def set_legend_settings(self, values: dict) -> dict:
         with self._tx() as con:
             for key, value in values.items():
@@ -199,13 +241,109 @@ class CompanyStore:
     def categories(self) -> list[dict]:
         with self._tx() as con:
             rows = con.execute("SELECT * FROM categories ORDER BY sort, title").fetchall()
+        fixed = self.category_colors()
         out = []
         for r in rows:
             d = dict(r)
             d["sheets"] = json.loads(d["sheets"] or "[]")
             d["hidden"] = bool(d["hidden"])
+            d["color"] = fixed.get(d["id"], "")
             out.append(d)
         return out
+
+    # -- company colours of categories ------------------------------------------
+
+    def _stored_category_colors(self, con) -> dict:
+        row = con.execute("SELECT value FROM options WHERE key='category_colors'").fetchone()
+        try:
+            value = json.loads(row["value"]) if row else {}
+        except ValueError:
+            value = {}
+        return value if isinstance(value, dict) else {}
+
+    def category_colors(self) -> dict[str, str]:
+        """{category id: fixed colour} for all projects (empty entries left out)."""
+        with self._tx() as con:
+            stored = self._stored_category_colors(con)
+        merged = {**DEFAULT_CATEGORY_COLORS, **stored}
+        return {k: v.lower() for k, v in merged.items() if isinstance(v, str) and _HEX_COLOR.match(v)}
+
+    def set_category_color(self, cat_id: str, color: str | None) -> None:
+        """A fixed colour for a category; None or "" goes back to the plan colour."""
+        color = (color or "").strip()
+        if color and not _HEX_COLOR.match(color):
+            raise ValueError("Farbe als #rrggbb angeben")
+        with self._tx() as con:
+            stored = self._stored_category_colors(con)
+            stored[cat_id] = color.lower()          # "" also switches a default (grey) off
+            con.execute("INSERT OR REPLACE INTO options VALUES ('category_colors', ?)", (json.dumps(stored),))
+            self._log(con, "category.color", f"{cat_id} -> {color or 'Planfarbe'}")
+
+    # -- check and merge -----------------------------------------------------------
+
+    def check_categories(self) -> list[dict]:
+        """Hints for tidying the categories: same title, same legend layer, nothing in it."""
+        cats = self.categories()
+        assigned: set[str] = {c for cs in self.assignments().values() for c in cs}
+        parents = {c["parent"] for c in cats if c.get("parent")}
+        out: list[dict] = []
+        by_title: dict[str, list[dict]] = {}
+        by_layer: dict[str, list[dict]] = {}
+        for c in cats:
+            by_title.setdefault(re.sub(r"\W+", " ", c["title"].lower()).strip(), []).append(c)
+            if c.get("layer"):
+                by_layer.setdefault(c["layer"], []).append(c)
+        for group in by_title.values():
+            if len(group) > 1:
+                out.append({"kind": "title", "text": f"Gleicher Name: {group[0]['title']}",
+                            "ids": [c["id"] for c in group]})
+        for layer, group in by_layer.items():
+            if len(group) > 1:
+                out.append({"kind": "layer", "text": f"Gleiche Legendenebene {layer}: "
+                            + ", ".join(c["title"] for c in group), "ids": [c["id"] for c in group]})
+        for c in cats:
+            if not c["sheets"] and c["id"] not in assigned and c["id"] not in parents:
+                out.append({"kind": "empty", "text": f"Leer: {c['title']} (keine Katalogblätter, keine Zuordnung)",
+                            "ids": [c["id"]]})
+        return out
+
+    def _merge(self, con, source: str, target: str) -> None:
+        """Merge inside an open transaction (see merge_categories)."""
+        rows = {r["id"]: r for r in con.execute("SELECT * FROM categories WHERE id IN (?,?)", (source, target))}
+        if source not in rows or target not in rows:
+            raise KeyError(source if source not in rows else target)
+        sheets = json.loads(rows[target]["sheets"] or "[]")
+        for sh in json.loads(rows[source]["sheets"] or "[]"):
+            if sh not in sheets:
+                sheets.append(sh)
+        con.execute("UPDATE categories SET sheets=?, updated_by=?, updated_at=? WHERE id=?",
+                    (json.dumps(sheets), current_user(), _now(), target))
+        con.execute("UPDATE categories SET parent=? WHERE parent=?", (target, source))
+        con.execute("UPDATE categories SET parent=NULL WHERE id=? AND parent=?", (target, target))
+        for row in con.execute("SELECT family_key, categories FROM assignments").fetchall():
+            cats = json.loads(row["categories"])
+            if source in cats:
+                merged = []
+                for c in (target if c == source else c for c in cats):
+                    if c not in merged:
+                        merged.append(c)
+                con.execute("UPDATE assignments SET categories=? WHERE family_key=?",
+                            (json.dumps(merged), row["family_key"]))
+        con.execute("DELETE FROM categories WHERE id=?", (source,))
+        stored = self._stored_category_colors(con)
+        if source in stored:
+            stored.pop(source)
+            con.execute("INSERT OR REPLACE INTO options VALUES ('category_colors', ?)", (json.dumps(stored),))
+
+    def merge_categories(self, source: str, target: str) -> dict:
+        """Put category ``source`` into ``target``: catalogue sheets, symbol assignments
+        and sub-categories move over, then ``source`` is removed."""
+        if source == target:
+            raise ValueError("Quelle und Ziel sind dieselbe Kategorie")
+        with self._tx() as con:
+            self._merge(con, source, target)
+            self._log(con, "category.merge", f"{source} -> {target}")
+        return next(c for c in self.categories() if c["id"] == target)
 
     def create_category(self, title: str, parent: str | None = None, layer: str = "") -> dict:
         base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-") or "kategorie"
@@ -305,6 +443,11 @@ class CompanyStore:
         with self._tx() as con:
             return {r["family_key"]: r["text"] for r in con.execute("SELECT * FROM descriptions")}
 
+    def description_rows(self) -> list[dict]:
+        """All company texts with who saved them last, by family key."""
+        with self._tx() as con:
+            return [dict(r) for r in con.execute("SELECT * FROM descriptions ORDER BY family_key")]
+
     def set_description(self, family_key: str, text: str | None) -> None:
         """Standard legend text of a family. Empty or None goes back to the library name."""
         with self._tx() as con:
@@ -353,10 +496,22 @@ class CompanyStore:
 
 def auto_categories(sheet: str, name: str, categories: list[dict],
                     dataset: str = "") -> tuple[list[str], str]:
-    """Automatic rule: number range, then dataset rule, then name pattern, else Diverse."""
+    """Automatic rule: number range, then dataset rule, then name pattern, else Diverse.
+    A few name rules come first (emergency luminaires are not «Licht»)."""
+    known_first = {c["id"] for c in categories}
+    for pattern, cat_id in NAME_FIRST:
+        if cat_id in known_first and re.search(pattern, (name or "").lower()):
+            return [cat_id], "Namensmuster"
     ids = [c["id"] for c in categories if sheet in c["sheets"]]
     if ids:
-        return ids, f"Nummernkreis {sheet}"
+        # a name rule may pick another group of the same section (Taster, Melder, Zutritt)
+        parents = {c["id"]: c.get("parent") for c in categories}
+        out: list[str] = []
+        for cid in ids:
+            g = group_by_name(cid, name, parents)
+            if g not in out:
+                out.append(g)
+        return out, f"Nummernkreis {sheet}"
     known = {c["id"] for c in categories}
     for fragment, cat_id in DATASET_RULES:
         if cat_id in known and fragment in dataset:

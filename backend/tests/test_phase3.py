@@ -158,3 +158,59 @@ def test_new_plan_version_without_floor_name_as_sent_by_the_ui(env):
     assert res.status_code == 200, res.text
     assert res.json()["plans"][0]["versions"] == 2
     assert import_dxf(client, pid, nova_like_dxf(tmp / "x.dxf"), name="").status_code == 200  # name from file
+
+
+def test_category_colour_check_merge_and_company_assignment(env):
+    client = env[0]
+    cats = client.get("/api/categories").json()["items"]
+    general = next(c for c in cats if c["id"] == "allgemein")
+    assert general["color"] == "#808080"           # «Allgemein» is grey by default
+    first = next(c for c in cats if c["id"] != "allgemein")
+    r = client.put(f"/api/categories/{first['id']}/color", json={"color": "#12AB34"})
+    assert next(c for c in r.json()["items"] if c["id"] == first["id"])["color"] == "#12ab34"
+    assert client.put(f"/api/categories/{first['id']}/color", json={"color": "rot"}).status_code == 400
+    r = client.put("/api/categories/allgemein/color", json={"color": ""})
+    assert next(c for c in r.json()["items"] if c["id"] == "allgemein")["color"] == ""
+
+    a = client.post("/api/categories", json={"title": "Doppelt"}).json()
+    b = client.post("/api/categories", json={"title": "doppelt"}).json()
+    client.put(f"/api/categories/{a['id']}", json={"sheets": ["777"]})
+    sub = client.post("/api/categories", json={"title": "Unter", "parent": b["id"]}).json()
+    client.put("/api/category-family", json={"family_key": "fam-x", "categories": [b["id"], a["id"]]})
+    hints = client.get("/api/categories/check").json()["items"]
+    assert any(h["kind"] == "title" and set(h["ids"]) == {a["id"], b["id"]} for h in hints)
+
+    r = client.post("/api/categories/merge", json={"source": b["id"], "target": a["id"]})
+    items = {c["id"]: c for c in r.json()["items"]}
+    assert b["id"] not in items and items[sub["id"]]["parent"] == a["id"]
+    assert client.get("/api/category-family", params={"family_key": "fam-x"}).json()["categories"] == [a["id"]]
+    assert client.post("/api/categories/merge", json={"source": a["id"], "target": a["id"]}).status_code == 400
+
+
+def test_old_company_database_gets_sections_and_groups_once(tmp_path):
+    import json
+    import sqlite3
+
+    from nova_legend.categories.store import CompanyStore, auto_categories
+
+    db = tmp_path / "firma.db"
+    CompanyStore(db)
+    # the state after the update of 12.10.: everything of Kommunikation in one category
+    with sqlite3.connect(db) as con:
+        con.execute("DELETE FROM categories WHERE parent IS NOT NULL")
+        con.execute("UPDATE categories SET parent='schwachstrom', sheets=? WHERE id='kommunikation'",
+                    (json.dumps(["250", "260", "310", "320", "290", "345", "GSA"]),))
+        con.execute("UPDATE categories SET sheets='[\"330\", \"270\"]' WHERE id='schwachstrom'")
+        con.execute("UPDATE categories SET title='Fluchtwegleuchten', sheets='[\"165\"]' WHERE id='fluchtweg'")
+        con.execute("INSERT OR REPLACE INTO assignments VALUES ('fam-k', '[\"kommunikation\"]', 'x', 'x')")
+        con.execute("INSERT OR REPLACE INTO options VALUES ('defaults_version', '4')")
+    store = CompanyStore(db)
+    cats = {c["id"]: c for c in store.categories()}
+    assert cats["kommunikation"]["parent"] is None
+    assert cats["edv"]["parent"] == "kommunikation" and cats["edv"]["title"] == "UKV"
+    assert "310" in cats["edv"]["sheets"] and "310" not in cats["kommunikation"]["sheets"]
+    assert "GSA" in cats["gsa"]["sheets"] and "270" in cats["uhren"]["sheets"]
+    assert "165" in cats["rettungszeichen"]["sheets"] and cats["fluchtweg"]["title"] == "Notbeleuchtung und Fluchtweg"
+    assert store.assignments()["fam-k"] == ["kommunikation"]           # manual choice stays
+    assert auto_categories("130", "Notleuchte eckig", list(cats.values()))[0] == ["notleuchten"]
+    assert auto_categories("130", "Deckenleuchte", list(cats.values()))[0] == ["licht"]

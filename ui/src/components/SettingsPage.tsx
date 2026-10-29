@@ -1,58 +1,42 @@
 import { useEffect, useState } from "react";
 import CompanyLegendCard from "./CompanyLegendCard";
-import { api, DATASET_LABEL, Status, UpdateInfo } from "../api";
+import CompanyTextsCard from "./CompanyTextsCard";
+import CompanySymbolsCard from "./CompanySymbolsCard";
+import { api, DATASET_LABEL, StencilData, Status, UpdateInfo } from "../api";
 import { TrashIcon } from "./Icons";
+import InfoTip from "./InfoTip";
 import type { ThemeMode } from "../theme";
+import Desc from "./Desc";
 
 interface Props {
   status: Status;
   update: UpdateInfo | null;
-  onUpdate: (u: UpdateInfo) => void;
+  onCheckUpdate: () => void;
+  onShowUpdate: () => void;
+  checking: boolean;
   notify: (text: string, error?: boolean) => void;
   onChanged: () => void;
   theme: ThemeMode;
   onTheme: (mode: ThemeMode) => void;
 }
 
-export default function SettingsPage({ status, update, onUpdate, notify, onChanged, theme, onTheme }: Props) {
+export default function SettingsPage({ status, update, onCheckUpdate, onShowUpdate, checking, notify, onChanged, theme, onTheme }: Props) {
   const [paths, setPaths] = useState<string[]>(status.settings.dataset_paths);
   const [newPath, setNewPath] = useState("");
   const [company, setCompany] = useState(status.settings.company_folder);
   const [projectsFolder, setProjectsFolder] = useState(status.settings.projects_folder);
   const [nova, setNova] = useState(status.settings.nova_version);
+  const [stencilFolder, setStencilFolder] = useState(status.settings.stencil_folder ?? "");
+  const [stencilInfo, setStencilInfo] = useState<StencilData | null>(null);
   const [busy, setBusy] = useState(false);
-  const [updating, setUpdating] = useState(false);
-
-  async function checkUpdate() {
-    setBusy(true);
-    try {
-      const u = await api.updateCheck();
-      onUpdate(u);
-      if (!u.available) notify(u.message || "Du hast die neueste Version.", Boolean(u.message && !u.latest));
-    } catch (e) {
-      notify((e as Error).message, true);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function installUpdate() {
-    if (!window.confirm("Update jetzt installieren? Das Programm schliesst sich und startet danach neu.")) return;
-    setUpdating(true);
-    try {
-      const r = await api.updateInstall();
-      notify(r.message);
-    } catch (e) {
-      notify((e as Error).message, true);
-      setUpdating(false);
-    }
-  }
 
   useEffect(() => {
     setPaths(status.settings.dataset_paths);
     setCompany(status.settings.company_folder);
     setProjectsFolder(status.settings.projects_folder);
     setNova(status.settings.nova_version);
+    setStencilFolder(status.settings.stencil_folder ?? "");
+    api.stencils("", status.settings.nova_version).then(setStencilInfo).catch(() => setStencilInfo(null));
   }, [status]);
 
   async function save(values: Parameters<typeof api.saveSettings>[0], ok: string) {
@@ -136,56 +120,50 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
         <div className="card">
           <h3>Programm-Update</h3>
           <p className="desc">
-            Installiert: {status.version_label}.
-            {update?.latest ? ` Neueste Version: ${update.latest}.` : ""}
+            Installiert:{" "}
+            <button type="button" className="version-link" onClick={onCheckUpdate} disabled={checking} title="Nach Updates suchen">
+              {checking ? "Suche …" : status.version_label}
+            </button>.
+            {update?.available ? ` Neu: ${update.latest}.` : ""}
           </p>
-          {update?.available && (
-            <p>
-              <span className="badge manual">neu</span> Version {update.latest} ist verfügbar
-              {update.size ? ` (${Math.round(update.size / 1e6)} MB)` : ""}.
-            </p>
-          )}
-          <label className="field" style={{ maxWidth: 420 }}>
-            <span>Welche Versionen</span>
-            <select
-              className="select"
-              value={status.settings.update_channel ?? "stable"}
-              disabled={busy || updating}
-              onChange={async (e) => {
-                await save({ update_channel: e.target.value as "stable" | "test" }, "Update-Kanal gespeichert");
-                checkUpdate();
-              }}
-              aria-label="Update-Kanal"
-            >
-              <option value="stable">Freigegebene Versionen</option>
-              <option value="test">Auch Testversionen (Entwicklung)</option>
-            </select>
-          </label>
-          <p className="hint">
-            Freigegebene Versionen kommen aus dem Hauptstand. Testversionen entstehen bei jeder Änderung in der Entwicklung und
-            können unfertig sein. Die Einstellung gilt nur für diesen Computer.
-          </p>
-          {update && !update.available && update.message && <p className="hint">{update.message}</p>}
-          {update?.available && !update.can_install && <p className="warn-text">{update.message}</p>}
-          <div className="row">
-            <button className="btn" disabled={busy || updating} onClick={checkUpdate}>
-              Nach Updates suchen
-            </button>
-            {update?.available && update.can_install && (
-              <button className="btn primary" disabled={updating} onClick={installUpdate}>
-                {updating ? "Update läuft …" : "Jetzt aktualisieren"}
-              </button>
+          <div className="update-row">
+            {status.is_admin && (
+              <label className="field">
+                <span>
+                  Welche Versionen
+                  <InfoTip text="Freigegebene Versionen kommen aus dem Hauptstand. Testversionen entstehen in der Entwicklung und können unfertig sein. Nur Admins sehen diese Auswahl. Sie gilt für diesen Computer." />
+                </span>
+                <select
+                  className="select"
+                  value={status.settings.update_channel ?? "stable"}
+                  disabled={busy || checking}
+                  onChange={async (e) => {
+                    await save({ update_channel: e.target.value as "stable" | "test" }, "Update-Kanal gespeichert");
+                    onCheckUpdate();
+                  }}
+                  aria-label="Update-Kanal"
+                >
+                  <option value="stable">Freigegebene Versionen</option>
+                  <option value="test">Auch Testversionen</option>
+                </select>
+              </label>
             )}
+            <div className="update-actions">
+              <button className="btn" disabled={busy || checking} onClick={onCheckUpdate}>
+                {checking ? "Suche …" : "Nach Updates suchen"}
+              </button>
+              {update?.available && (
+                <button className="btn primary" onClick={onShowUpdate}>
+                  Update ansehen
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         <div className="card">
           <h3>Nova-Datensätze</h3>
-          <p className="desc">
-            Die Symbole stammen aus den Nova-Elektro-Datensätzen (.nzp). «Automatisch suchen» sucht in
-            C:\Users\Public\Documents\Trimble\Warehouse und übernimmt nur Elektro-Datensätze mit Symbolen.
-            Einzelne Dateien fügst du unten ein: im Explorer Shift + Rechtsklick → «Als Pfad kopieren».
-          </p>
+          <Desc short="Die Symbole stammen aus den Nova-Elektro-Datensätzen (.nzp)." more="«Automatisch suchen» sucht in C:\Users\Public\Documents\Trimble\Warehouse und übernimmt nur Elektro-Datensätze mit Symbolen. Einzelne Dateien fügst du unten ein: im Explorer Shift + Rechtsklick → «Als Pfad kopieren»." />
           <div className="path-list">
             {paths.length === 0 && <div className="hint">Noch kein Datensatz eingetragen.</div>}
             {paths.map((p) => {
@@ -279,15 +257,12 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
 
         <div className="card">
           <h3>Projektordner</h3>
-          <p className="desc">
-            Hier legt das Programm pro Projekt einen Ordner an (Projektdatei, importierte Pläne, später die Legenden).
-            Alle Mitarbeitenden tragen denselben Ordner ein.
-          </p>
+          <Desc short="Hier legt das Programm pro Projekt einen Ordner an (Projektdatei, importierte Pläne, später die Legenden)." more="Alle Mitarbeitenden tragen denselben Ordner ein. Der Ordner ist nicht fest im Programm: jede Firma trägt ihren eigenen ein." />
           <div className="row">
             <input
               className="input"
               style={{ flex: 1, minWidth: 260 }}
-              placeholder="T:\_CAD\NovaDat\NovaFirma12\Makro\Legenden"
+              placeholder="\\\\Server\\CAD\\Legenden\\Projekte"
               value={projectsFolder}
               title={projectsFolder}
               aria-label="Projektordner"
@@ -311,22 +286,22 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
               disabled={busy || projectsFolder === status.settings.projects_folder}
               onClick={() => save({ projects_folder: cleanPath(projectsFolder) }, "Projektordner gespeichert")}
             >
-              Speichern
-            </button>
-          </div>
+            Speichern
+          </button>
         </div>
+        {!projectsFolder.trim() && (
+          <p className="hint">Ohne Eintrag liegen die Projekte nur auf diesem Computer. Für die Firma denselben Ordner eintragen und speichern.</p>
+        )}
+      </div>
 
-        <div className="card">
-          <h3>Firmenordner</h3>
-          <p className="desc">
-            Hier liegen die gemeinsamen Kategorien und Zuordnungen (Datei edeco ag-Legenden-firma.sqlite). Alle Mitarbeitenden tragen
-            denselben Ordner ein, zum Beispiel T:\_CAD\NOVA-Legenden. Ohne Eintrag speichert das Programm nur lokal.
-          </p>
+      <div className="card">
+        <h3>Firmenordner</h3>
+        <Desc short="Hier liegen die gemeinsamen Kategorien, Zuordnungen und Firmentexte." more="Alle Mitarbeitenden tragen denselben Ordner ein. Ohne Eintrag speichert das Programm nur auf diesem Computer. Der Ordner ist nicht fest im Programm." />
           <div className="row">
             <input
               className="input"
               style={{ flex: 1, minWidth: 260 }}
-              placeholder="T:\_CAD\NOVA-Legenden"
+              placeholder="\\\\Server\\CAD\\Legenden\\Firma"
               value={company}
               title={company}
               aria-label="Firmenordner"
@@ -358,15 +333,34 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
           {status.company_error && <p className="warn-text">{status.company_error}</p>}
         </div>
 
+        <div className="card">
+          <h3>Benutzerschablonen</h3>
+          <p className="desc">
+            Deine Nova-Schablonen (.n5q). Der Legenden-Editor zeigt sie links unter «Benutzerschablone», und der Vorschlag nimmt ihre
+            Bezeichnungen, wenn es keinen Firmentext gibt. {"{nova}"} im Pfad ersetzt das Programm durch die Nova-Version des
+            Projekts: 19 für Nova 19.2, 20 für Nova 20. %USERPROFILE% ist dein Benutzerordner.
+          </p>
+          <div className="row">
+            <input className="input" style={{ flex: 1, minWidth: 260 }} value={stencilFolder} title={stencilFolder}
+              placeholder="%USERPROFILE%\\Documents\\Trimble\\nova{nova}\\Stencils"
+              aria-label="Ordner der Benutzerschablonen" onChange={(e) => setStencilFolder(e.target.value)} />
+            <button className="btn primary" disabled={busy || stencilFolder === (status.settings.stencil_folder ?? "")}
+              onClick={() => save({ stencil_folder: cleanPath(stencilFolder) }, "Ordner der Benutzerschablonen gespeichert")}>
+              Speichern
+            </button>
+          </div>
+          {stencilInfo && <StencilRead info={stencilInfo} />}
+        </div>
+
         <CompanyLegendCard canPick={canPick} choose={choose} notify={notify} />
+
+        <CompanyTextsCard notify={notify} />
+
+        <CompanySymbolsCard notify={notify} />
 
         <div className="card">
           <h3>Nova-Version (Standard für neue Projekte)</h3>
-          <p className="desc">
-            Nova-Programmversion, zum Beispiel 19.2 oder 20. Jedes Projekt speichert seine eigene Angabe. Die Angabe ist
-            eine Information zum Projekt: Der Import liest heute alle Pläne gleich und prüft die Nova-Version nicht.
-            Geprüft ist das Programm mit Nova 19.2 Patch 3, Nova 20 noch nicht.
-          </p>
+          <Desc short="Nova-Version für neue Projekte, z. B. 19.2 oder 20." more="Jedes Projekt speichert seine eigene Angabe. Die Angabe ist eine Information zum Projekt: Der Import liest heute alle Pläne gleich und prüft die Nova-Version nicht. Geprüft ist das Programm mit Nova 19.2 Patch 3, Nova 20 noch nicht." />
           <div className="row">
             <select
               className="select"
@@ -384,10 +378,7 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
 
         <div className="card">
           <h3>DWG-Unterstützung (ODA File Converter)</h3>
-          <p className="desc">
-            Nur für DWG-Dateien nötig. DXF, N4D und N4M funktionieren ohne. Der Converter ist kostenlos und wird separat von
-            der Open Design Alliance installiert.
-          </p>
+          <Desc short="Nur für DWG-Dateien nötig." more="DXF, N4D und N4M funktionieren ohne. Der Converter ist kostenlos und wird separat von der Open Design Alliance installiert." />
           {status.oda ? (
             <p>
               <span className="badge manual">gefunden</span> {status.oda}
@@ -405,7 +396,11 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
           <h3>Info</h3>
           <dl className="kv">
             <dt>Programmversion</dt>
-            <dd>{status.version_label}</dd>
+            <dd>
+              <button type="button" className="version-link" onClick={onCheckUpdate} disabled={checking} title="Nach Updates suchen">
+                {checking ? "Suche …" : status.version_label}
+              </button>
+            </dd>
             <dt>Benutzer</dt>
             <dd>{status.user}</dd>
             <dt>Lokale Daten</dt>
@@ -425,5 +420,26 @@ export default function SettingsPage({ status, update, onUpdate, notify, onChang
         </div>
       </div>
     </div>
+  );
+}
+
+/** What the stencil folder gave us, and how much of it the library already knows. */
+function StencilRead({ info }: { info: StencilData }) {
+  const entries = info.sets.flatMap((s) => s.tabs.flatMap((t) => t.entries));
+  const linked = entries.filter((e) => e.symbol_key).length;
+  if (!info.found) {
+    return <p className="warn-text stencil-read">Ordner nicht gefunden: {info.folder}. Die Schablonen wurden nicht gelesen und sind nicht in der Bibliothek.</p>;
+  }
+  if (!info.files.length) {
+    return <p className="warn-text stencil-read">Ordner gelesen, keine .n5q-Datei darin: {info.folder}</p>;
+  }
+  const missing = entries.length - linked;
+  return (
+    <p className="hint stencil-read ok">
+      Gelesen: {info.files.join(", ")}. {info.sets.length} Schablonen-Sätze, {entries.length} Einträge.
+      {" "}{linked} davon sind in der Bibliothek und im Legenden-Editor unter «Benutzerschablone».
+      {missing > 0 ? ` ${missing} Einträge haben kein passendes Symbol in den geladenen Datensätzen.` : ""}
+      {info.errors?.length ? ` ${info.errors.join(" ")}` : ""}
+    </p>
   );
 }

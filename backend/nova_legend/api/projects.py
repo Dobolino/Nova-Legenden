@@ -99,8 +99,10 @@ class MappingIn(BaseModel):
 
 def register(app: FastAPI, st) -> None:
     def manager() -> ProjectManager:
-        folder = st.settings.projects_folder or config.DEFAULT_PROJECTS_FOLDER
-        return ProjectManager(Path(folder))
+        # A shared folder is whatever the firm typed in. Empty: this computer only.
+        folder = (st.settings.projects_folder or "").strip()
+        root = Path(folder) if folder else config.local_home() / "Projekte"
+        return ProjectManager(root)
 
     def project(project_id: str):
         try:
@@ -127,10 +129,22 @@ def register(app: FastAPI, st) -> None:
         chosen = (p.settings().get("category_layers") or {})
         usage = getattr(ev, "layer_usage", {})
         used = category_usage(result["rows"])
+        # a section counts the apparatus of its groups
+        parents = {c["id"]: c.get("parent") for c in ev.categories}
+        for cid, n in list(used.items()):
+            seen = {cid}
+            up = parents.get(cid)
+            while up and up not in seen:
+                used[up] = used.get(up, 0) + n
+                seen.add(up)
+                up = parents.get(up)
         out = []
         for cat in ev.categories:
             picked = pick_category_layer(cat.get("layer") or "", layers, usage.get(cat["id"], {}),
                                          chosen.get(cat["id"]) or None)
+            if cat.get("color"):
+                # company colour of the category: the same in every project
+                picked = {**picked, "color": cat["color"], "reason": "Firmenfarbe der Kategorie", "fixed": True}
             out.append({"id": cat["id"], "title": cat["title"], "parent": cat.get("parent"),
                         "legend_layer": cat.get("layer") or "", **picked,
                         **category_state(picked, layers, used.get(cat["id"], 0))})
@@ -164,7 +178,8 @@ def register(app: FastAPI, st) -> None:
     @app.get("/api/projects")
     def list_projects() -> dict:
         m = manager()
-        return {"folder": str(m.root), "folder_exists": m.root.is_dir(), "items": m.list()}
+        return {"folder": str(m.root), "folder_exists": m.root.is_dir(),
+                "shared": bool((st.settings.projects_folder or "").strip()), "items": m.list()}
 
     @app.post("/api/projects")
     def create_project(body: ProjectIn) -> dict:

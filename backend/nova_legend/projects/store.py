@@ -2,6 +2,7 @@
 
     <projects folder>/<Projektname>/projekt.nlproj   SQLite file with all data
     <projects folder>/<Projektname>/Plaene/          copies of the imported plan files
+    <projects folder>/<Projektname>/Legenden/        one folder per named legend
     <projects folder>/_Geloescht/                    deleted projects (moved, not destroyed)
 
 The project file stores plans (floors), each import as a version, the
@@ -29,6 +30,8 @@ from ..config import current_user
 
 PROJECT_FILE = "projekt.nlproj"
 PLANS_DIR = "Plaene"
+LEGENDS_DIR = "Legenden"
+LEGEND_FILE = "legende.json"
 TRASH_DIR = "_Geloescht"
 SCHEMA_VERSION = 1
 log = logging.getLogger(__name__)
@@ -57,6 +60,9 @@ CREATE TABLE IF NOT EXISTS legend (
 LEGEND_TABLE = ("CREATE TABLE IF NOT EXISTS legend (id INTEGER PRIMARY KEY CHECK (id = 1), "
                 "doc TEXT NOT NULL, updated_at TEXT, updated_by TEXT)")
 
+LEGENDS_TABLE = ("CREATE TABLE IF NOT EXISTS legends (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, "
+                 "sort INTEGER NOT NULL DEFAULT 0, doc TEXT NOT NULL, updated_at TEXT, updated_by TEXT)")
+
 TEMPLATE_SETTINGS_EXCLUDE = {"name"}
 
 
@@ -68,6 +74,11 @@ def safe_folder_name(name: str) -> str:
     """Folder name for a project: no characters Windows forbids."""
     cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip().rstrip(".")
     return cleaned or "Projekt"
+
+
+def legend_dir_name(legend_id: int, name: str) -> str:
+    """Folder of one legend: the number keeps the order and survives a rename."""
+    return safe_folder_name(f"{int(legend_id):02d} {(name or 'Legende').strip()}")
 
 
 def project_folder_name(name: str) -> str:
@@ -397,21 +408,132 @@ class Project:
 
     # -- legend (Phase 4) ------------------------------------------------------------
 
-    def legend(self) -> dict | None:
-        """Stored legend document with who saved it last, or None."""
+    # -- legends: several named legends per project ------------------------------------
+    #
+    # Table "legends" holds every legend. The first one (lowest sort) is mirrored into
+    # the older single-row table "legend", so earlier program versions still open the
+    # project with that legend.
+
+    def _legends_ready(self, con: sqlite3.Connection) -> None:
+        con.execute(LEGEND_TABLE)
+        con.execute(LEGENDS_TABLE)
+        if con.execute("SELECT COUNT(*) FROM legends").fetchone()[0] == 0:
+            old = con.execute("SELECT * FROM legend WHERE id=1").fetchone()
+            if old:
+                con.execute("INSERT INTO legends (id, name, sort, doc, updated_at, updated_by) VALUES (1,?,0,?,?,?)",
+                            ("Legende", old["doc"], old["updated_at"], old["updated_by"]))
+
+    def legends(self) -> list[dict]:
+        """All legends of the project in order: id, name, saved when and by whom, entries."""
         with self.tx() as con:
-            con.execute(LEGEND_TABLE)
-            row = con.execute("SELECT * FROM legend WHERE id=1").fetchone()
+            self._legends_ready(con)
+            rows = con.execute("SELECT * FROM legends ORDER BY sort, id").fetchall()
+        out = []
+        for r in rows:
+            doc = json.loads(r["doc"])
+            entries = sum(1 for b in doc.get("blocks") or [] for it in b.get("items") or []
+                          if it.get("kind") != "gap")
+            out.append({"id": r["id"], "name": r["name"], "updated_at": r["updated_at"],
+                        "updated_by": r["updated_by"], "entries": entries,
+                        "folder": f"{LEGENDS_DIR}/{legend_dir_name(r['id'], r['name'])}"})
+        self.sync_legend_folders()
+        return out
+
+    def first_legend_id(self) -> int | None:
+        items = self.legends()
+        return items[0]["id"] if items else None
+
+    def legend(self, legend_id: int | None = None) -> dict | None:
+        """Stored legend document with who saved it last, or None. Without an id: the first."""
+        with self.tx() as con:
+            self._legends_ready(con)
+            if legend_id is None:
+                row = con.execute("SELECT * FROM legends ORDER BY sort, id LIMIT 1").fetchone()
+            else:
+                row = con.execute("SELECT * FROM legends WHERE id=?", (legend_id,)).fetchone()
         if not row:
             return None
-        return {"doc": json.loads(row["doc"]), "updated_at": row["updated_at"], "updated_by": row["updated_by"]}
+        return {"id": row["id"], "name": row["name"], "doc": json.loads(row["doc"]),
+                "updated_at": row["updated_at"], "updated_by": row["updated_by"]}
 
-    def set_legend(self, doc: dict) -> dict:
+    def set_legend(self, doc: dict, legend_id: int | None = None) -> dict:
+        """Save a legend. Without an id the first legend (created if there is none)."""
+        text = json.dumps(doc, ensure_ascii=False)
         with self.tx() as con:
-            con.execute(LEGEND_TABLE)
+            self._legends_ready(con)
+            if legend_id is None:
+                row = con.execute("SELECT id FROM legends ORDER BY sort, id LIMIT 1").fetchone()
+                legend_id = row["id"] if row else None
+            if legend_id is None:
+                cur = con.execute("INSERT INTO legends (name, sort, doc, updated_at, updated_by) VALUES (?,?,?,?,?)",
+                                  ("Legende", 0, text, _now(), current_user()))
+                legend_id = int(cur.lastrowid)
+            else:
+                if not con.execute("SELECT 1 FROM legends WHERE id=?", (legend_id,)).fetchone():
+                    raise KeyError(legend_id)
+                con.execute("UPDATE legends SET doc=?, updated_at=?, updated_by=? WHERE id=?",
+                            (text, _now(), current_user(), legend_id))
+            self._mirror_first(con)
+        self.sync_legend_folders()
+        return self.legend(legend_id) or {}
+
+    def add_legend(self, name: str, doc: dict) -> dict:
+        with self.tx() as con:
+            self._legends_ready(con)
+            sort = (con.execute("SELECT MAX(sort) FROM legends").fetchone()[0] or 0) + 1
+            cur = con.execute("INSERT INTO legends (name, sort, doc, updated_at, updated_by) VALUES (?,?,?,?,?)",
+                              (name.strip()[:80] or "Legende", sort, json.dumps(doc, ensure_ascii=False),
+                               _now(), current_user()))
+            new_id = int(cur.lastrowid)
+            self._mirror_first(con)
+        self.sync_legend_folders()
+        return self.legend(new_id) or {}
+
+    def rename_legend(self, legend_id: int, name: str) -> None:
+        with self.tx() as con:
+            self._legends_ready(con)
+            if not con.execute("UPDATE legends SET name=? WHERE id=?",
+                               (name.strip()[:80] or "Legende", legend_id)).rowcount:
+                raise KeyError(legend_id)
+        self.sync_legend_folders()
+
+    def delete_legend(self, legend_id: int) -> None:
+        """Remove one legend. The last legend of a project stays."""
+        with self.tx() as con:
+            self._legends_ready(con)
+            if con.execute("SELECT COUNT(*) FROM legends").fetchone()[0] <= 1:
+                raise ValueError("Die letzte Legende eines Projekts bleibt bestehen.")
+            if not con.execute("DELETE FROM legends WHERE id=?", (legend_id,)).rowcount:
+                raise KeyError(legend_id)
+            self._mirror_first(con)
+        self.sync_legend_folders()
+
+    def sync_legend_folders(self) -> None:
+        """One folder per legend under Legenden/, next to Plaene. The database stays the record."""
+        root = self.folder / LEGENDS_DIR
+        root.mkdir(parents=True, exist_ok=True)
+        with self.tx() as con:
+            self._legends_ready(con)
+            rows = list(con.execute("SELECT * FROM legends ORDER BY sort, id"))
+        keep: set[str] = set()
+        for r in rows:
+            folder_name = legend_dir_name(r["id"], r["name"])
+            keep.add(folder_name)
+            dest = root / folder_name
+            dest.mkdir(parents=True, exist_ok=True)
+            payload = {"id": r["id"], "name": r["name"], "updated_at": r["updated_at"],
+                       "updated_by": r["updated_by"], "doc": json.loads(r["doc"])}
+            (dest / LEGEND_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        for child in list(root.iterdir()):
+            if child.is_dir() and (child / LEGEND_FILE).is_file() and child.name not in keep:
+                shutil.rmtree(child)
+
+    @staticmethod
+    def _mirror_first(con: sqlite3.Connection) -> None:
+        first = con.execute("SELECT * FROM legends ORDER BY sort, id LIMIT 1").fetchone()
+        if first:
             con.execute("INSERT OR REPLACE INTO legend VALUES (1,?,?,?)",
-                        (json.dumps(doc, ensure_ascii=False), _now(), current_user()))
-        return self.legend() or {}
+                        (first["doc"], first["updated_at"], first["updated_by"]))
 
     def versions(self, plan_id: int) -> list[dict]:
         with self.tx() as con:
@@ -520,8 +642,17 @@ class ProjectManager:
                     con.execute("INSERT OR REPLACE INTO layers VALUES (?,?,?,?)",
                                 (l["name"], l["color"], l["linetype"], "Vorlage"))
             stored = src.legend()
+            # every legend of the template, with its name and order
+            for k, item in enumerate(src.legends()):
+                full = src.legend(item["id"])
+                if not full:
+                    continue
+                if k == 0:
+                    first = project.set_legend(full["doc"])
+                    project.rename_legend(first["id"], item["name"])
+                else:
+                    project.add_legend(item["name"], full["doc"])
             if stored:
-                project.set_legend(stored["doc"])
                 style = stored["doc"].get("style") or {}
                 legend_style = {"text_size": style.get("text_size", (legend_style or {}).get("text_size")),
                                 "symbol_scale": style.get("symbol_scale", (legend_style or {}).get("symbol_scale")),

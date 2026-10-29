@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } from "react";
-import { api, Category, FamilyItem, GeneralInfo, LegendInfo, LegendLayout, LegendPrim, ProjectDetail, SymbolRender } from "../api";
+import { api, Category, CompanySymbolLook, FamilyItem, GeneralInfo, LegendInfo, LegendLayout, LegendPrim, ProjectDetail, StencilData, StencilEntry, SymbolRender } from "../api";
 import { exportDiagnostic } from "../diagnostics";
+import InfoTip from "./InfoTip";
 import {
   addBlock,
   addItem,
   beginSave,
   blockForCategory,
   commit,
+  combineItems,
   coveredRows,
   describe,
+  entryText,
   duplicateItems,
   hideCovered,
   History,
@@ -18,6 +21,7 @@ import {
   insertItem,
   isCurrentSave,
   LegendBlock,
+  GeneralSection,
   LegendDoc,
   LegendItem,
   LineStyle,
@@ -26,6 +30,9 @@ import {
   moveItemInOrder,
   moveItemTo,
   moveItemToBlock,
+  companyKey,
+  makeItem,
+  placeInCell,
   push,
   redo,
   removeBlock,
@@ -33,6 +40,10 @@ import {
   replace,
   rotateItem,
   SectionStyle,
+  splitItem,
+  detachPart,
+  LegendPart,
+  updatePart,
   Selection,
   staleItems,
   symbolRequestKey,
@@ -51,6 +62,8 @@ interface Props {
   data: ProjectDetail;
   categories: Category[];
   notify: (text: string, error?: boolean) => void;
+  /** The named legend to edit; null opens the first legend of the project. */
+  legendId?: number | null;
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -65,40 +78,162 @@ type DragPayload =
   | { type: "move"; block: string; item: string }
   | { type: "add"; family_key: string | null; symbol_key: string; text: string; categories: string[] };
 /** Where it lands: in front of `before` in `block` (null: at the end). */
-type DropTarget = { block: string; before: string | null };
+type DropTarget = { block: string; before: string | null; cell?: number };
+/** Id of the entry a drop preview shows for a new symbol from the lists. */
+const DROP_ID = "__drop__";
+
+const BAR_KEY = "nl.legend.toolbar";
+/** What the toolbar of the legend editor can show; each computer chooses (Ansicht ▾). */
+const TOOLBAR_ITEMS = [
+  { id: "history", label: "Neuer Vorschlag, Rückgängig" },
+  { id: "insert", label: "Einfügen" },
+  { id: "grid", label: "Raster" },
+  { id: "rows", label: "Zeile und Text (mm)" },
+  { id: "columns", label: "Spalten" },
+  { id: "sizes", label: "Schrift, Symbole, gleiche Fläche" },
+  { id: "general", label: "Allgemeinteil ein/aus" },
+  { id: "zoom", label: "Zoom" },
+  { id: "gridlines", label: "Raster anzeigen" },
+  { id: "export", label: "DXF herunterladen" },
+] as const;
+const TOOLBAR_DEFAULT = ["history", "insert", "grid", "columns", "general", "zoom", "gridlines", "export"];
+
+function readBarPref(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(BAR_KEY);
+    const list = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(list)) return new Set(list.filter((x) => typeof x === "string"));
+  } catch {
+    /* default */
+  }
+  return new Set(TOOLBAR_DEFAULT);
+}
 
 function readGridPref(): boolean {
   try {
-    return window.localStorage.getItem(GRID_KEY) === "1";
+    // on, until this computer switches it off
+    return window.localStorage.getItem(GRID_KEY) !== "0";
   } catch {
-    return false;
+    return true;
   }
 }
 
-export default function LegendEditor({ projectId, data, categories, notify }: Props) {
+const PANE_KEY = "nl.legend.panes";
+const PANE_LIMITS = { outline: [180, 520], props: [240, 560] } as const;
+
+/** Widths of the side panels, as the user dragged them (per computer). */
+function readPanes(): { outline: number; props: number } {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(PANE_KEY) || "{}");
+    return { outline: Number(v.outline) || 210, props: Number(v.props) || 280 };
+  } catch {
+    return { outline: 210, props: 280 };
+  }
+}
+
+export default function LegendEditor({ projectId, data, categories, notify, legendId = null }: Props) {
   const [hist, setHist] = useState<History<LegendDoc> | null>(null);
   const [info, setInfo] = useState<LegendInfo | null>(null);
   const [placed, setPlaced] = useState<LegendLayout | null>(null);
   const [general, setGeneral] = useState<(GeneralInfo & { svg: string; prims: LegendPrim[] }) | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [savedInfo, setSavedInfo] = useState("");
-  const [sel, setSel] = useState<Selection | { type: "general" }>(null);
+  const [sel, setSel] = useState<Selection>(null);
+  // a second entry chosen with Ctrl/Shift+click: it can be combined with the selected one
+  const [pick, setPick] = useState<{ block: string; item: string } | null>(null);
+  const selectOnSheet = useCallback((s: Selection, add?: boolean) => {
+    setSel((cur) => {
+      if (add && s?.type === "item" && cur?.type === "item" && cur.item !== s.item) {
+        setPick({ block: s.block, item: s.item });
+        return cur;
+      }
+      setPick(null);
+      return s;
+    });
+  }, []);
+  const [generalRev, setGeneralRev] = useState(0);
   const [zoom, setZoom] = useState(4);
   const [symbols, setSymbols] = useState<Record<string, SymbolRender>>({});
   const [busy, setBusy] = useState(false);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<FamilyItem[]>([]);
   const [exportBlock, setExportBlock] = useState("");
-  const [exportGeneral, setExportGeneral] = useState(true);
+
   const [showGrid, setShowGrid] = useState(readGridPref);
+  const [panes, setPanes] = useState(readPanes);
+
+  /** Drag the border of a side panel, like a pane in the Explorer. Double click: back to the default. */
+  function startPaneDrag(e: ReactPointerEvent, which: "outline" | "props") {
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = panes[which];
+    const [lo, hi] = PANE_LIMITS[which];
+    let latest = panes;
+    const move = (ev: PointerEvent) => {
+      const dx = ev.clientX - x0;
+      const w = Math.round(Math.max(lo, Math.min(hi, which === "outline" ? w0 + dx : w0 - dx)));
+      latest = { ...latest, [which]: w };
+      setPanes(latest);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      document.body.classList.remove("pane-resizing");
+      try {
+        window.localStorage.setItem(PANE_KEY, JSON.stringify(latest));
+      } catch {
+        /* only a convenience */
+      }
+    };
+    document.body.classList.add("pane-resizing");
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
+  function resetPane(which: "outline" | "props") {
+    const next = { ...panes, [which]: which === "outline" ? 240 : 280 };
+    setPanes(next);
+    try {
+      window.localStorage.setItem(PANE_KEY, JSON.stringify(next));
+    } catch {
+      /* only a convenience */
+    }
+  }
   const [detached, setDetached] = useState(false);
   const [windowed, setWindowed] = useState(false);
+  // sections opened in the list on the left (one line per section until opened)
+  const [openBlocks, setOpenBlocks] = useState<Set<string>>(() => new Set());
+  const toggleOpen = (id: string) => setOpenBlocks((cur) => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const [bar, setBar] = useState<Set<string>>(readBarPref);
+  const saveBar = (next: Set<string>) => {
+    setBar(next);
+    try {
+      window.localStorage.setItem(BAR_KEY, JSON.stringify([...next]));
+    } catch {
+      /* only a convenience */
+    }
+  };
+  const toggleBar = (id: string) => {
+    const next = new Set(bar);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    saveBar(next);
+  };
   const [dropAt, setDropAt] = useState<DropTarget | null>(null);
+  // while dragging onto a cell: the legend as it would look after the drop (others make room)
+  const [preview, setPreview] = useState<{ layout: LegendLayout; id: string } | null>(null);
+  const paperRef = useRef<SVGSVGElement>(null);
   const [exporting, setExporting] = useState(false);
   const dragPayload = useRef<DragPayload | null>(null);
   const sheetDrag = useRef<{ block: string; item: string; x: number; y: number; active: boolean } | null>(null);
   const justDragged = useRef(false);
-  const [saveSession] = useState(() => new SaveSession(projectId, api.saveLegend));
+  // one save session per legend: writes always go to the legend that was edited
+  const [saveSession] = useState(() => new SaveSession(projectId, (pid: string, d: LegendDoc) => api.saveLegend(pid, d, undefined, legendId)));
   const { register } = useNavigation();
   const layoutGate = useRef({ generation: 0 });
   const fieldBefore = useRef<LegendDoc | null>(null);
@@ -108,7 +243,42 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
   const colorByCat = useMemo(() => Object.fromEntries(data.category_colors.map((c) => [c.id, c.color])), [data.category_colors]);
   const layerByCat = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c.layer ?? ""])), [categories]);
   const catTitle = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c.title])), [categories]);
+  const catParent = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c.parent ?? null])), [categories]);
+  /** A group and its sections up to the top: an entry of «UKV» goes to «UKV» if the legend
+   *  has that section, else to «Kommunikation». */
+  const lineage = useCallback((id: string): string[] => {
+    const out = [id];
+    while (catParent[out[out.length - 1]] && !out.includes(catParent[out[out.length - 1]]!)) out.push(catParent[out[out.length - 1]]!);
+    return out;
+  }, [catParent]);
   const descriptions = info?.descriptions ?? {};
+  // the general part belongs to the legend: a themed legend (only UKV) goes without it
+  const exportGeneral = doc?.general_on !== false;
+  const setExportGeneral = (on: boolean) => {
+    if (doc) change({ ...doc, general_on: on });
+  };
+  const stencilNames = info?.stencil_names ?? {};
+  const companySymbols = info?.company_symbols ?? {};
+  /** Size, turn and mirror a company symbol brings along when it is added. */
+  const look = (familyKey: string | null | undefined): Partial<LegendItem> => {
+    const saved = familyKey ? companySymbols[familyKey] : undefined;
+    return saved ? { symbol_factor: saved.symbol_factor, rotation: saved.rotation, mirror: saved.mirror } : {};
+  };
+  // your Nova user stencil: loaded once per editor, one tab open at a time
+  const [stencil, setStencil] = useState<StencilData | null>(null);
+  const [stencilTab, setStencilTab] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.stencils(projectId).then((r) => alive && setStencil(r)).catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [projectId]);
+  const openStencilEntries = useMemo(() => {
+    if (!stencil || !stencilTab) return [];
+    const [si, ti] = stencilTab.split(":").map(Number);
+    return stencil.sets[si]?.tabs[ti]?.entries ?? [];
+  }, [stencil, stencilTab]);
 
   // -- load, general part, save ------------------------------------------------------------
 
@@ -116,7 +286,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     let alive = true;
     setInfo(null);
     api
-      .legend(projectId)
+      .legend(projectId, legendId)
       .then((r) => {
         if (!alive) return;
         setInfo(r);
@@ -143,7 +313,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     return () => {
       alive = false;
     };
-  }, [projectId, notify, saveSession]);
+  }, [projectId, legendId, notify, saveSession]);
 
   // Register the latest rendered edit before navigation events can flush it.
   useLayoutEffect(() => { saveSession.update(doc); }, [doc, saveSession]);
@@ -162,6 +332,19 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
       throw e;
     }
   }, [notify, saveSession]);
+
+  const saveLegend = useCallback(async () => {
+    if (!saveSession.dirty) {
+      notify("Die Legende ist bereits gespeichert.");
+      return;
+    }
+    try {
+      await saveNow();
+      notify("Legende gespeichert.");
+    } catch {
+      /* saveNow already reported the error */
+    }
+  }, [notify, saveNow, saveSession]);
 
   useEffect(() => register({ flush: saveNow, dirty: () => saveSession.dirty }), [register, saveNow, saveSession]);
 
@@ -187,11 +370,12 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
       window.clearTimeout(handle);
       ctrl.abort();
     };
-  }, [doc, projectId]);
+  }, [doc, projectId, generalRev]);
 
   // symbol drawings for the placed symbols (and those of a general part from a template project),
   // plus the small icons of the lists on the left (same drawing, without length)
-  const stripFill = Boolean(doc?.style.strip_fill);
+  // "10" = hatches off, "01" = solid fills off: a change reloads the drawings
+  const stripFill = `${doc?.style.hatch_off ? 1 : 0}${doc?.style.fill_off ? 1 : 0}`;
   const stripSeen = useRef(stripFill);
   const symbolGen = useRef(0);
   useEffect(() => {
@@ -201,22 +385,33 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     const prims = [...(placed?.prims ?? []), ...(general?.prims ?? [])].filter((p) => p.t === "symbol");
     const need = new Map<string, LegendPrim>();
     for (const p of prims) {
-      const key = symbolRequestKey({ symbol_key: p.key, length_mm: p.length_mm, width_mm: p.width_mm });
+      const key = symbolRequestKey({ symbol_key: p.key, length_mm: p.length_mm, width_mm: p.width_mm, flat: Boolean(p.flat) });
       if (!known[key]) need.set(key, p);
     }
     const listed = [
       ...data.rows.filter((r) => r.total > 0 && r.symbol_key).map((r) => ({ key: r.symbol_key, family_key: r.family_key })),
       ...results.map((f) => ({ key: f.representative.key, family_key: f.key })),
+      ...openStencilEntries.filter((e) => e.symbol_key).map((e) => ({ key: e.symbol_key as string, family_key: e.family_key })),
     ];
     for (const l of listed) {
       const key = symbolRequestKey({ symbol_key: l.key, length_mm: null, width_mm: null });
       if (!known[key] && !need.has(key)) need.set(key, { t: "symbol", key: l.key, family_key: l.family_key, length_mm: null, width_mm: null });
     }
+    for (const b of doc?.blocks ?? []) {
+      for (const it of b.items) {
+        if (it.kind !== "symbol" || !it.symbol_key || !it.symbol_color) continue;
+        const key = symbolRequestKey({ symbol_key: it.symbol_key, length_mm: null, width_mm: null, flat: true });
+        if (!known[key] && !need.has(key)) {
+          need.set(key, { t: "symbol", key: it.symbol_key, family_key: it.family_key, length_mm: null, width_mm: null, flat: true });
+        }
+      }
+    }
     if (!need.size) return;
     const list = [...need.entries()];
     const gen = ++symbolGen.current;
     api
-      .legendSymbols(list.map(([, p]) => ({ symbol_key: p.key, family_key: p.family_key, length_mm: p.length_mm, width_mm: p.width_mm })), stripFill)
+      .legendSymbols(list.map(([, p]) => ({ symbol_key: p.key, family_key: p.family_key, length_mm: p.length_mm, width_mm: p.width_mm, flat: Boolean(p.flat) })),
+        { hatch_off: stripFill[0] === "1", fill_off: stripFill[1] === "1" })
       .then((r) => {
         if (gen !== symbolGen.current || stripSeen.current !== stripFill) return;
         setSymbols((prev) => {
@@ -226,7 +421,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
         });
       })
       .catch(() => undefined);
-  }, [placed, general, symbols, data.rows, results, stripFill]);
+  }, [placed, general, symbols, data.rows, results, openStencilEntries, stripFill, doc]);
 
   useEffect(() => {
     if (search.trim().length < 2) {
@@ -276,9 +471,10 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
   }
 
   function ensureBlock(d: LegendDoc, categoriesOfEntry: string[], fallback: string | null): { doc: LegendDoc; id: string } {
-    const found = blockForCategory(d, categoriesOfEntry, null);
+    const found = blockForCategory(d, categoriesOfEntry.flatMap(lineage), null);
     if (found) return { doc: d, id: found };
-    const cat = categoriesOfEntry.find((c) => catTitle[c]);
+    // a new section is the top category of the group
+    const cat = categoriesOfEntry.map((c) => lineage(c)[lineage(c).length - 1]).find((c) => catTitle[c]);
     if (cat) return addBlock(d, catTitle[cat], cat, colorByCat[cat], layerByCat[cat] ?? "");
     if (fallback && d.blocks.some((b) => b.id === fallback)) return { doc: d, id: fallback };
     if (d.blocks[0]) return { doc: d, id: d.blocks[0].id };
@@ -295,7 +491,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     let last: { block: string; item: string } | null = null;
     for (const r of rows) {
       const target = ensureBlock(d, r.categories, selectedBlockId());
-      const res = addItem(target.doc, target.id, { kind: "symbol", family_key: r.family_key, symbol_key: r.symbol_key, text: describe(r.family_key, r.title, descriptions) });
+      const res = addItem(target.doc, target.id, { kind: "symbol", family_key: r.family_key, symbol_key: r.symbol_key, text: describe(r.family_key, r.title, descriptions, stencilNames), ...look(r.family_key) });
       d = res.doc;
       last = { block: target.id, item: res.id };
     }
@@ -307,10 +503,19 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     if (!doc) return;
     const familyKey = f.key;
     const target = ensureBlock(doc, f.categories, selectedBlockId());
-    const res = addItem(target.doc, target.id, { kind: "symbol", family_key: familyKey, symbol_key: f.representative.key, text: describe(familyKey, f.title, descriptions) });
+    const res = addItem(target.doc, target.id, { kind: "symbol", family_key: familyKey, symbol_key: f.representative.key, text: describe(familyKey, f.title, descriptions, stencilNames), ...look(familyKey) });
     change(res.doc);
     setSel({ type: "item", block: target.id, item: res.id });
     setSearch("");
+  }
+
+  function addFromStencil(e: StencilEntry) {
+    if (!doc || !e.symbol_key) return;
+    const target = ensureBlock(doc, e.categories, selectedBlockId());
+    const text = describe(e.family_key, e.name, descriptions, {});
+    const res = addItem(target.doc, target.id, { kind: "symbol", family_key: e.family_key, symbol_key: e.symbol_key, text, ...look(e.family_key) });
+    change(res.doc);
+    setSel({ type: "item", block: target.id, item: res.id });
   }
 
   function addKind(kind: "line" | "note" | "text") {
@@ -357,22 +562,49 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
   // -- drag and drop ---------------------------------------------------------------------
 
   function drop(payload: DragPayload | null, target: DropTarget | null) {
+    // the preview already shows the legend after the drop: keep it on the sheet until the
+    // new layout arrives, so the entries do not jump back to their old places first
+    if (target?.cell !== undefined && preview) setPlaced(preview.layout);
     setDropAt(null);
+    setPreview(null);
     if (!doc || !payload || !target) return;
+    if (target.cell !== undefined) {
+      if (payload.type === "move") {
+        change(placeInCell(doc, target.block, target.cell, { block: payload.block, item: payload.item }));
+        setSel({ type: "item", block: target.block, item: payload.item });
+      } else {
+        const fresh = makeItem({ kind: "symbol", family_key: payload.family_key, symbol_key: payload.symbol_key, text: payload.text, ...look(payload.family_key) });
+        change(placeInCell(doc, target.block, target.cell, { item: fresh }));
+        setSel({ type: "item", block: target.block, item: fresh.id });
+      }
+      return;
+    }
     if (payload.type === "move") {
       if (payload.item === target.before) return;
       change(moveItemTo(doc, payload.block, payload.item, target.block, target.before));
       setSel({ type: "item", block: target.block, item: payload.item });
     } else {
-      const res = insertItem(doc, target.block, { kind: "symbol", family_key: payload.family_key, symbol_key: payload.symbol_key, text: payload.text }, target.before);
+      const res = insertItem(doc, target.block, { kind: "symbol", family_key: payload.family_key, symbol_key: payload.symbol_key, text: payload.text, ...look(payload.family_key) }, target.before);
       change(res.doc);
       setSel({ type: "item", block: target.block, item: res.id });
     }
   }
 
-  /** Drop place under the pointer on the sheet: an entry (upper or lower half) or a section. */
+  /** Cell of the grid under the pointer (from the layout before the drag started). */
+  function cellAt(x: number, y: number): DropTarget | null {
+    const svg = paperRef.current;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm || !placed) return null;
+    const pt = new DOMPoint(x, y).matrixTransform(ctm.inverse());
+    const c = placed.prims.find((p) => p.t === "cell" && pt.x >= p.x && pt.x < p.x + p.w && pt.y >= p.y && pt.y < p.y + p.h);
+    return c ? { block: c.block, before: null, cell: c.index } : null;
+  }
+
+  /** Drop place under the pointer on the sheet: a cell of the grid, else the end of a section. */
   function sheetTargetAt(x: number, y: number): DropTarget | null {
     if (!doc) return null;
+    const cell = cellAt(x, y);
+    if (cell) return cell;
     const el = document.elementFromPoint(x, y) as (Element & { dataset?: DOMStringMap }) | null;
     const hit = el?.closest?.("[data-hit]") as (SVGElement & { dataset: DOMStringMap }) | null;
     if (!hit) return null;
@@ -399,7 +631,8 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
       if (!d) return;
       if (!d.active && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 4) return;
       d.active = true;
-      setDropAt(sheetTargetAt(e.clientX, e.clientY));
+      const t = sheetTargetAt(e.clientX, e.clientY);
+      setDropAt((old) => (old?.block === t?.block && old?.before === t?.before && old?.cell === t?.cell ? old : t));
     };
     const up = (e: PointerEvent) => {
       const d = sheetDrag.current;
@@ -429,6 +662,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
       onDragEnd: () => {
         dragPayload.current = null;
         setDropAt(null);
+        setPreview(null);
       },
     };
   }
@@ -451,9 +685,65 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     };
   }
 
+  // live preview of a drop into a cell: the layout after the drop, others moved on
+  useEffect(() => {
+    if (!doc || dropAt?.cell === undefined) {
+      setPreview(null);
+      return;
+    }
+    const sheet = sheetDrag.current;
+    const payload: DragPayload | null = sheet?.active ? { type: "move", block: sheet.block, item: sheet.item } : dragPayload.current;
+    if (!payload) return;
+    const next =
+      payload.type === "move"
+        ? placeInCell(doc, dropAt.block, dropAt.cell, { block: payload.block, item: payload.item })
+        : placeInCell(doc, dropAt.block, dropAt.cell, {
+            item: makeItem({ id: DROP_ID, kind: "symbol", family_key: payload.family_key, symbol_key: payload.symbol_key, text: payload.text, ...look(payload.family_key) }),
+          });
+    const id = payload.type === "move" ? payload.item : DROP_ID;
+    const ctrl = new AbortController();
+    const handle = window.setTimeout(() => {
+      api
+        .layoutLegend(projectId, next, ctrl.signal)
+        .then((layout) => setPreview({ layout, id }))
+        .catch(() => undefined);
+    }, 30);
+    return () => {
+      window.clearTimeout(handle);
+      ctrl.abort();
+    };
+  }, [dropAt, doc, projectId]);
+
+  // Entries glide to their new place when the layout changes (drag preview, drop, undo):
+  // FLIP, start where the entry was, then let CSS move it to where it is now.
+  const entryPos = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const layoutNow = dropAt?.cell !== undefined && preview ? preview.layout : placed;
+  useLayoutEffect(() => {
+    const svg = paperRef.current;
+    if (!svg || !layoutNow) return;
+    const now = new Map<string, { x: number; y: number }>();
+    for (const p of layoutNow.prims) if (p.t === "hit" && p.kind === "item") now.set(p.id, { x: p.x, y: p.y });
+    const before = entryPos.current;
+    entryPos.current = now;
+    if (!before.size || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    svg.querySelectorAll<SVGGElement>("g[data-entry]").forEach((g) => {
+      const id = g.dataset.entry ?? "";
+      const a = before.get(id);
+      const b = now.get(id);
+      if (!a || !b || (Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01)) return;
+      g.style.transition = "none";
+      g.style.transform = `translate(${a.x - b.x}px, ${a.y - b.y}px)`;
+      g.getBoundingClientRect();           // apply the start position before the move
+      requestAnimationFrame(() => {
+        g.style.transition = "transform 180ms cubic-bezier(.2,.7,.3,1)";
+        g.style.transform = "";
+      });
+    });
+  }, [layoutNow]);
+
   // -- save now and export ----------------------------------------------------------------
 
-  async function exportFile(format: "dxf" | "dwg", block: string, withGeneral: boolean) {
+  async function exportFile(format: "dxf" | "dwg" | "pdf", block: string, withGeneral: boolean) {
     if (format === "dwg" && !info?.oda) {
       notify("Für DWG-Dateien wird der ODA File Converter gebraucht. Er ist nicht installiert. Alternative: DXF exportieren.", true);
       return;
@@ -461,8 +751,8 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     setExporting(true);
     try {
       await saveNow();
-      const { name } = await api.legendExportName(projectId, format, block);
-      const blob = await api.legendExportFile(api.legendExportUrl(projectId, name, format, block, withGeneral));
+      const { name } = await api.legendExportName(projectId, format, block, legendId);
+      const blob = await api.legendExportFile(api.legendExportUrl(projectId, name, format, block, withGeneral, legendId));
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -505,16 +795,47 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  function fitWidth() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const padding = getComputedStyle(canvas);
+    const width = canvas.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
+    setZoom(Math.max(0.5, Math.min(12, round(width / W))));
+  }
+
+  const generalOpen = openBlocks.has("__general__") || sel?.type === "general-row";
+
+  /** A section is open in the list when opened by hand or when it holds the selected entry. */
+  function isOpen(b: LegendBlock): boolean {
+    return openBlocks.has(b.id) || (sel?.type === "item" && sel.block === b.id);
+  }
+
+  function toggleGrid() {
+    const next = !showGrid;
+    setShowGrid(next);
+    try {
+      window.localStorage.setItem(GRID_KEY, next ? "1" : "0");
+    } catch {
+      /* only a convenience */
+    }
+  }
+
   // -- render ------------------------------------------------------------------------------
 
   if (!info) return <div className="hint">lädt …</div>;
 
-  const generalBox = general?.kind ? (
+  const generalBox = general?.kind && doc?.general_on === false ? (
     <p className="info-line">
-      Allgemeinteil: {general.kind === "dxf" ? "DXF/DWG" : "Vorlagen-Projekt"} vom Server, gesperrt.
+      Ohne Allgemeinteil.{" "}
+      <button className="btn small" onClick={() => setExportGeneral(true)}>Einblenden</button>
     </p>
   ) : general?.error ? (
-    <p className="info-line company">Allgemeinteil: {general.error}</p>
+    <p className="info-line company">
+      <span title={general.error}>Allgemeinteil nicht gefunden.</span>{" "}
+      <button className="btn small" onClick={() => window.dispatchEvent(new CustomEvent("nl:open-settings"))}>
+        Vorlage wählen
+      </button>
+    </p>
   ) : null;
 
   if (!doc) {
@@ -542,148 +863,262 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
   const dups = duplicateItems(doc);
   const selBlock = sel && "block" in sel ? doc.blocks.find((b) => b.id === sel.block) : undefined;
   const selItem = sel?.type === "item" ? selBlock?.items.find((i) => i.id === sel.item) : undefined;
-  const W = placed?.width ?? 200;
-  const H = placed?.height ?? 100;
+  // during a drag onto a cell the sheet shows the preview, so the others visibly make room
+  const shown = dropAt?.cell !== undefined && preview ? preview.layout : placed;
+  const W = shown?.width ?? 200;
+  const H = shown?.height ?? 100;
   const setStyle = (patch: Partial<LegendDoc["style"]>) => change({ ...doc, style: { ...style, ...patch } });
 
   return (
     <>
     {windowed && (
-      <button type="button" className="legend-window-back" aria-label="Editorfenster über den Hintergrund schliessen" tabIndex={-1} onClick={() => setWindowed(false)} />
+      <button type="button" className="legend-window-back" aria-label="Grossansicht beenden" title="Grossansicht beenden" onClick={() => setWindowed(false)} />
     )}
     <div className={`legend-editor ${windowed ? "windowed" : ""}`}>
-      {generalBox}
-      <div className="legend-toolbar">
-        <div className="tool-group" role="group" aria-label="Verlauf">
-        <button className="btn small" disabled={!hist?.past.length} onClick={() => setHist((h) => (h ? undo(h) : h))} title="Rückgängig (Strg+Z)">
-          ↶ Rückgängig
-        </button>
-        <button className="btn small" disabled={!hist?.future.length} onClick={() => setHist((h) => (h ? redo(h) : h))} title="Wiederholen (Strg+Y)">
-          ↷ Wiederholen
-        </button>
+      {(generalBox || windowed) && (
+        <div className="legend-head">
+          <div className="legend-head-info">{generalBox}</div>
+          {windowed && (
+            <div className="legend-head-actions">
+              <button className="btn small primary" onClick={() => setWindowed(false)} title="Grossansicht schliessen. Esc geht auch.">
+                ✕ Grossansicht beenden
+              </button>
+            </div>
+          )}
         </div>
-        <div className="tool-group" role="group" aria-label="Aufbau">
-        <Menu label="Einfügen">
-          <button className="btn small" onClick={() => addKind("text")} title={FREE_TEXT_HINT}>
-            + Freier Text
-          </button>
-          <button className="btn small" onClick={() => addKind("line")} title="Linienmuster, z. B. für Leitungen und Trassen">
-            + Linie
-          </button>
-          <button className="btn small" onClick={() => addKind("note")}>
-            + Hinweis
-          </button>
-          <button
-            className="btn small"
-            onClick={() => {
+      )}
+      <div className="legend-toolbar">
+        {bar.has("history") && (
+          <div className="tool-group" role="group" aria-label="Verlauf">
+            <button className="btn small" disabled={busy} onClick={proposal} title="Legende aus den aktuellen Projektzahlen neu vorschlagen">
+              Neuer Vorschlag
+            </button>
+            <button className="btn small icon-btn" disabled={!hist?.past.length} onClick={() => setHist((h) => (h ? undo(h) : h))}
+              title="Rückgängig (Strg+Z)" aria-label="Rückgängig">↶</button>
+            <button className="btn small icon-btn" disabled={!hist?.future.length} onClick={() => setHist((h) => (h ? redo(h) : h))}
+              title="Wiederholen (Strg+Y)" aria-label="Wiederholen">↷</button>
+          </div>
+        )}
+        {bar.has("insert") && (
+          <Menu label="Einfügen">
+            <button className="btn small" onClick={() => addKind("text")} title={FREE_TEXT_HINT}>+ Freier Text</button>
+            <button className="btn small" onClick={() => addKind("line")} title="Linienmuster, z. B. für Leitungen und Trassen">+ Linie</button>
+            <button className="btn small" onClick={() => addKind("note")}>+ Hinweis</button>
+            <button className="btn small" onClick={() => {
               const r = addBlock(doc, "Neuer Abschnitt");
               change(r.doc);
               setSel({ type: "block", block: r.id });
-            }}
-          >
-            + Abschnitt
+            }}>+ Abschnitt</button>
+          </Menu>
+        )}
+        {(bar.has("grid") || bar.has("rows") || bar.has("columns")) && (
+          <div className="tool-group" role="group" aria-label="Raster">
+          {bar.has("grid") && (<label className="filter-label">
+            Raster
+            <select
+              className="select"
+              value={style.grid}
+              onChange={(e) => {
+                if (e.target.value === "custom") {
+                  setStyle({ grid: "custom" });
+                  return;
+                }
+                // row and text step change at once, so the grid lines follow without a reload
+                const g = info.grids.find((x) => x.id === e.target.value);
+                if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
+              }}
+              aria-label="Rastermass"
+              title="Zeilenhöhe / Textabstand in mm"
+            >
+              {info.grids.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.id === "standard"
+                    ? "Standard (aus Schrift)"
+                    : `${g.label} ${String(g.row).replace(".", ",")} / ${String(g.text_offset).replace(".", ",")} mm`}
+                </option>
+              ))}
+              <option value="custom">Eigenes Mass</option>
+            </select>
+          </label>)}
+            {bar.has("rows") && (
+              <>
+                <label className="filter-label">
+                  Zeile
+                  <span className="grid-mm">
+                    <NumberInput label="Zeilenhöhe in mm" value={style.row} step={0.5} min={3} max={30}
+                      onCommit={(v) => setStyle({ grid: "custom", row: Math.round(v * 100) / 100 })} />
+                  </span>
+                </label>
+                <label className="filter-label">
+                  Text
+                  <span className="grid-mm">
+                    <NumberInput label="Textabstand in mm" value={style.text_offset} step={0.5} min={5} max={45}
+                      onCommit={(v) => setStyle({ grid: "custom", text_offset: Math.round(v * 100) / 100 })} />
+                  </span>
+                </label>
+              </>
+            )}
+            {bar.has("columns") && (
+              <label className="filter-label">
+                Spalten
+                <select className="select" value={style.columns} onChange={(e) => setStyle({ columns: Number(e.target.value) })}>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                </select>
+              </label>
+            )}
+          </div>
+        )}
+        {bar.has("sizes") && (
+          <div className="tool-group" role="group" aria-label="Grössen">
+            <label className="filter-label">
+              Schrift
+              <span className="grid-mm">
+                <NumberInput label="Schriftgrösse in mm" value={style.text_size} step={0.25} min={1} max={10}
+                  onCommit={(v) => setStyle({ text_size: Math.max(1, Math.min(10, v)) })} />
+              </span>
+            </label>
+            <label className="filter-label">
+              Symbole
+              <span className="grid-mm">
+                <NumberInput label="Symbolmassstab" value={style.symbol_scale} step={0.1} min={0.2} max={5}
+                  onCommit={(v) => setStyle({ symbol_scale: Math.max(0.2, Math.min(5, v)) })} />
+              </span>
+            </label>
+            {(style.symbol_size ?? "tile") === "tile" && (
+              <label className="toggle" title="Jedes Symbol bekommt dieselbe Fläche, höchstens 75 % der Kachel">
+                <input type="checkbox" checked={style.normalize_size !== false} onChange={(e) => setStyle({ normalize_size: e.target.checked })} />
+                Gleiche Fläche
+              </label>
+            )}
+          </div>
+        )}
+        {bar.has("general") && general?.kind && (
+          <label className="toggle tool-toggle" title={`Allgemeinteil in dieser Legende zeigen (Vorschau und Export). ${general.kind === "dxf" ? "DXF/DWG" : "Vorlagen-Projekt"} vom Server, gesperrt. Schrift, Symbolgrösse, Abstand und Spalten übernimmt er von dieser Legende.`}>
+            <input type="checkbox" checked={exportGeneral} onChange={(e) => setExportGeneral(e.target.checked)} />
+            Allgemeinteil
+          </label>
+        )}
+        {bar.has("zoom") && (
+          <div className="tool-group" role="group" aria-label="Zoom">
+            <button className="btn small" onClick={() => setZoom((z) => Math.max(0.5, round(z / 1.25)))} aria-label="Verkleinern" title="Verkleinern">−</button>
+            <span className="hint zoom-value">{Math.round((zoom / 4) * 100)} %</span>
+            <button className="btn small" onClick={() => setZoom((z) => Math.min(12, round(z * 1.25)))} aria-label="Vergrössern" title="Vergrössern">+</button>
+            <button className="btn small" onClick={fitWidth} title="Die Ansicht an die verfügbare Breite anpassen. Ändert nur den Zoom.">An Breite</button>
+          </div>
+        )}
+        {bar.has("gridlines") && (
+          <button className={`btn small ${showGrid ? "is-on" : ""}`} aria-pressed={showGrid} onClick={toggleGrid} aria-label="Raster anzeigen"
+            title="Rasterlinien im gewählten Mass einblenden. Sie erscheinen nicht im Export.">
+            ▦ Raster
           </button>
-        </Menu>
-        </div>
+        )}
         <Menu label="Ansicht">
-        <div className="menu-fields">
-        <label className="filter-label">
-          Raster
-          <select
-            className="select"
-            value={style.grid}
-            onChange={(e) => {
-              // row and text step change at once, so the grid lines follow without a reload
-              const g = info.grids.find((x) => x.id === e.target.value);
-              if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
-            }}
-            aria-label="Rastermass"
-          >
-            {info.grids.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.id === "standard" ? "★ " : ""}
-                {g.label} · Zeile {String(g.row).replace(".", ",")} mm · Text {String(g.text_offset).replace(".", ",")} mm
-              </option>
+          <div className="menu-fields">
+            <label className="filter-label">
+              Raster
+              <select
+                className="select"
+                value={style.grid}
+                onChange={(e) => {
+                  if (e.target.value === "custom") {
+                    setStyle({ grid: "custom" });
+                    return;
+                  }
+                  // row and text step change at once, so the grid lines follow without a reload
+                  const g = info.grids.find((x) => x.id === e.target.value);
+                  if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
+                }}
+                aria-label="Rastermass"
+                title="Zeilenhöhe / Textabstand in mm"
+              >
+                {info.grids.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.id === "standard"
+                      ? "★ Standard · Kachel aus der Schrift"
+                      : `${g.label} · Zeile ${String(g.row).replace(".", ",")} mm · Text ${String(g.text_offset).replace(".", ",")} mm`}
+                  </option>
+                ))}
+                <option value="custom">Benutzerdefiniert</option>
+              </select>
+            </label>
+          </div>
+          {!bar.has("gridlines") && (
+            <button className={`btn small ${showGrid ? "is-on" : ""}`} aria-pressed={showGrid} onClick={toggleGrid}>Raster anzeigen</button>
+          )}
+          <button className={`btn small ${detached ? "is-on" : ""}`} aria-pressed={detached} onClick={() => setDetached((v) => !v)}>
+            {detached ? "Einstellungen andocken" : "Einstellungen schwebend"}
+          </button>
+          {!windowed && <button className="btn small" onClick={() => setWindowed(true)} title="Den Editor über das ganze Programmfenster öffnen. Esc schliesst ihn.">Als Fenster</button>}
+          <div className="menu-divider" />
+          <div className="menu-fields bar-choice" role="group" aria-label="Sichtbar in der Leiste">
+            <span className="hint">In der Leiste zeigen:</span>
+            {TOOLBAR_ITEMS.map((t) => (
+              <label key={t.id} className="toggle">
+                <input type="checkbox" checked={bar.has(t.id)} onChange={() => toggleBar(t.id)} />
+                {t.label}
+              </label>
             ))}
-          </select>
-        </label>
-        <label className="filter-label">
-          Spalten
-          <select className="select" value={style.columns} onChange={(e) => setStyle({ columns: Number(e.target.value) })}>
-            <option value={2}>2</option>
-            <option value={3}>3</option>
-          </select>
-        </label>
-        </div>
-        <button
-          className={`btn small ${showGrid ? "is-on" : ""}`}
-          aria-pressed={showGrid}
-          onClick={() => {
-            const next = !showGrid;
-            setShowGrid(next);
-            try {
-              window.localStorage.setItem(GRID_KEY, next ? "1" : "0");
-            } catch {
-              /* only a convenience */
-            }
-          }}
-          title="Rasterlinien im gewählten Mass einblenden. Sie erscheinen nicht im Export."
-        >
-          Raster anzeigen
-        </button>
-        <button className={`btn small ${detached ? "is-on" : ""}`} aria-pressed={detached} onClick={() => setDetached((v) => !v)}
-          title="Die Einstellungen als schwebendes Fenster über der Legende öffnen. Das Blatt bleibt weiss.">
-          {detached ? "Einstellungen andocken" : "Einstellungen lösen"}
-        </button>
-        {!windowed && <button className="btn small" onClick={() => setWindowed(true)}
-          title="Die Legende gross über dem Programm öffnen. Das Blatt bleibt weiss.">
-          Als Fenster
-        </button>}
-        <div className="menu-divider" />
-        <button className="btn small" disabled={busy} onClick={proposal} title="Legende aus den aktuellen Projektzahlen neu vorschlagen">
-          Neuer Vorschlag
-        </button>
+            <button className="btn small" onClick={() => saveBar(new Set(TOOLBAR_DEFAULT))}>Standard</button>
+          </div>
         </Menu>
         {windowed && <button className="btn small" onClick={() => setWindowed(false)}>Fenster schliessen</button>}
-        <div className="tool-group" role="group" aria-label="Zoom">
-        <button className="btn small" onClick={() => setZoom((z) => Math.max(0.5, round(z / 1.25)))} aria-label="Verkleinern">
-          −
-        </button>
-        <span className="hint" style={{ minWidth: 44, textAlign: "center" }}>
-          {Math.round((zoom / 4) * 100)} %
-        </span>
-        <button className="btn small" onClick={() => setZoom((z) => Math.min(12, round(z * 1.25)))} aria-label="Vergrössern">
-          +
-        </button>
-        <button className="btn small" onClick={() => {
-          const canvas = canvasRef.current;
-          if (!canvas) return;
-          const padding = getComputedStyle(canvas);
-          const width = canvas.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
-          setZoom(Math.max(0.5, Math.min(12, round(width / W))));
-        }} title="Die Ansicht an die verfügbare Breite anpassen. Ändert nur den Zoom.">An Breite anpassen</button>
-        </div>
+
         <span style={{ flex: 1 }} />
-        <span className={saveState === "error" ? "dirty" : saveState === "saving" ? "hint" : "saved"} role="status" title={savedInfo ? `Zuletzt gespeichert ${savedInfo}` : undefined}>
+        <span className={saveState === "error" ? "dirty" : saveState === "saving" ? "hint" : "saved"} role="status"
+          title={savedInfo ? `Zuletzt gespeichert ${savedInfo}` : undefined}>
           {saveState === "saving" ? "Speichert …" : saveState === "error" ? "Nicht gespeichert" : savedInfo ? "Gespeichert" : ""}
         </span>
-        <div className="tool-group" role="group" aria-label="Export">
-        <button className="btn small primary" disabled={busy || exporting} onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}
-          title={exportBlock ? "Den in den Exportoptionen gewählten Abschnitt als DXF herunterladen" : "Die ganze Legende als DXF herunterladen"}>
-          <Icon name="download" size={16} /> {exporting ? "Exportiert …" : "DXF herunterladen"}
-        </button>
-        </div>
+        {bar.has("export") && (
+          <button className="btn small primary" disabled={busy || exporting}
+            onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}
+            title={exportBlock ? "Den gewählten Abschnitt als DXF herunterladen" : "Die ganze Legende als DXF herunterladen"}>
+            <Icon name="download" size={16} /> {exporting ? "Exportiert …" : "DXF herunterladen"}
+          </button>
+        )}
       </div>
+      {windowed && (
+        <div className="legend-window-bar">
+          <span><span className="le-badge small" aria-hidden>✎</span> <strong>Legendeneditor</strong> · {info?.legend?.name || "Legende"} · Grossansicht, Esc kehrt zurück.</span>
+        </div>
+      )}
 
-      <div className={`legend-body ${detached ? "detached" : ""}`}>
+      <div className={`legend-body ${detached ? "detached" : ""}`}
+        style={{ ["--outline-w" as string]: `${panes.outline}px`, ["--props-w" as string]: `${panes.props}px` }}>
+        <div className="pane-handle outline" role="separator" aria-orientation="vertical" aria-label="Breite der Liste links ändern"
+          title="Ziehen ändert die Breite. Doppelklick: Standardbreite." onPointerDown={(e) => startPaneDrag(e, "outline")}
+          onDoubleClick={() => resetPane("outline")} />
+        {!detached && (
+          <div className="pane-handle props" role="separator" aria-orientation="vertical" aria-label="Breite der Einstellungen ändern"
+            title="Ziehen ändert die Breite. Doppelklick: Standardbreite." onPointerDown={(e) => startPaneDrag(e, "props")}
+            onDoubleClick={() => resetPane("props")} />
+        )}
         <aside className="legend-outline">
           <div className="section" style={{ marginTop: 0 }}>
             Abschnitte
           </div>
-          {general?.kind && (
-            <button className={`outline-item ${sel?.type === "general" ? "active" : ""}`} style={{ paddingLeft: 6 }} onClick={() => setSel({ type: "general" })}>
-              🔒 Allgemeinteil (gesperrt)
-            </button>
+          {general?.kind && doc.general_on !== false && (
+            <div className="outline-block">
+              <div className={`outline-row ${sel?.type === "general" ? "active" : ""}`}>
+                <button className="fold-btn" aria-label={generalOpen ? "Einklappen" : "Aufklappen"} aria-expanded={generalOpen}
+                  onClick={() => toggleOpen("__general__")}>{generalOpen ? "▾" : "▸"}</button>
+                <span className="swatch" style={{ background: doc.general_section?.header || "#808080", width: 12, height: 12 }} />
+                <button className="outline-title" onClick={() => { setSel({ type: "general" }); toggleOpen("__general__"); }} title="Kategorie des Allgemeinteils">
+                  <span className="outline-text">{doc.general_section?.title || "Allgemein"}</span>
+                  <span className="outline-count">{general.rows?.length ?? ""}</span>
+                </button>
+              </div>
+              {generalOpen && general.rows?.map((row) => (
+                <button
+                  key={row.id}
+                  className={`outline-item ${sel?.type === "general-row" && sel.id === row.id ? "active" : ""}`}
+                  onClick={() => setSel({ type: "general-row", id: row.id })}
+                  title={row.heading ? "Zwischenüberschrift" : row.text}
+                >
+                  {row.heading ? "T " : ""}{row.text}
+                </button>
+              ))}
+            </div>
           )}
           {doc.title.text.trim() && (
             <button className={`outline-item ${sel?.type === "title" ? "active" : ""}`} style={{ paddingLeft: 6 }} onClick={() => setSel({ type: "title" })} title={doc.title.text}>
@@ -696,27 +1131,31 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
                 className={`outline-row ${sel?.type === "block" && sel.block === b.id ? "active" : ""} ${dropAt?.block === b.id && dropAt.before === null ? "drop-end" : ""}`}
                 {...dropProps({ block: b.id, before: null })}
               >
-                <button className="fold-btn" aria-label={b.collapsed ? "Aufklappen" : "Einklappen"} onClick={() => change(updateBlock(doc, b.id, { collapsed: !b.collapsed }))}>
-                  {b.collapsed ? "▸" : "▾"}
+                <button className="fold-btn" aria-label={isOpen(b) ? "Einklappen" : "Aufklappen"} aria-expanded={isOpen(b)} onClick={() => toggleOpen(b.id)}>
+                  {isOpen(b) ? "▾" : "▸"}
                 </button>
                 <span className="swatch" style={{ background: b.style.header, width: 12, height: 12 }} />
-                <button className="outline-title" onClick={() => setSel({ type: "block", block: b.id })} title={b.title}>
-                  {b.title || "(ohne Überschrift)"} <span className="hint">{b.items.filter((it) => !it.hidden).length}</span>
+                <button className="outline-title" onClick={() => { setSel({ type: "block", block: b.id }); toggleOpen(b.id); }} title={b.title}>
+                  <span className="outline-text">{b.title || "(ohne Überschrift)"}</span>
+                  <span className="outline-count">{b.items.filter((it) => !it.hidden && it.kind !== "gap").length}</span>
                 </button>
               </div>
-              {!b.collapsed &&
-                b.items.map((it) => (
+              {isOpen(b) &&
+                b.items.filter((it) => it.kind !== "gap").map((it) => (
                   <button
                     key={it.id}
                     className={`outline-item ${sel?.type === "item" && sel.item === it.id ? "active" : ""} ${it.hidden ? "hidden-entry" : ""} ${dropAt?.block === b.id && dropAt.before === it.id ? "drop-before" : ""}`}
-                    onClick={() => setSel({ type: "item", block: b.id, item: it.id })}
-                    title={`${it.text} · ziehen zum Verschieben`}
+                    onClick={(e) => selectOnSheet({ type: "item", block: b.id, item: it.id }, e.ctrlKey || e.metaKey || e.shiftKey)}
+                    title={`${entryText(it)} · ziehen zum Verschieben · Strg+Klick: zweites Kästchen zum Kombinieren`}
                     {...dragProps({ type: "move", block: b.id, item: it.id })}
                     {...dropProps({ block: b.id, before: it.id })}
                   >
-                    {it.kind === "symbol" && it.symbol_key ? <SymIcon r={symbols[symbolRequestKey({ symbol_key: it.symbol_key, length_mm: null, width_mm: null })]} /> : null}
+                    {it.kind === "symbol" && it.symbol_key ? <SymIcon r={symbols[symbolRequestKey({ symbol_key: it.symbol_key, length_mm: null, width_mm: null, flat: Boolean(it.symbol_color) })]} color={it.symbol_color || it.color || b.style.symbol} /> : null}
                     {it.kind === "line" ? "― " : it.kind === "note" ? "◐ " : it.kind === "text" ? "¶ " : ""}
-                    {it.text || "(ohne Text)"}
+                    <span className="outline-text">{entryText(it) || "(ohne Text)"}</span>
+                    {companyKey(it) && descriptions[companyKey(it)!] === it.text.trim() && (
+                      <span className="badge company" title="Dieser Text ist der Firmentext">F</span>
+                    )}
                     {it.hidden && <span className="badge">im Allgemeinteil</span>}
                     {dups.has(it.id) && <span className="badge warn">doppelt</span>}
                     {stale.has(it.id) && <span className="badge weg">nicht im Projekt</span>}
@@ -732,7 +1171,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
             <>
               <p className="hint">Anklicken oder auf einen Abschnitt ziehen.</p>
               {missing.slice(0, 40).map((r) => {
-                const text = describe(r.family_key, r.title, descriptions);
+                const text = describe(r.family_key, r.title, descriptions, stencilNames);
                 return (
                   <button
                     key={r.family_key}
@@ -757,7 +1196,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
               <div className="section">Im Allgemeinteil ({inGeneralRows.length})</div>
               <p className="hint">Der Allgemeinteil zeigt diese Apparate schon. Sie kommen nicht in den Vorschlag. Ziehen geht trotzdem.</p>
               {inGeneralRows.map((r) => {
-                const text = describe(r.family_key, r.title, descriptions);
+                const text = describe(r.family_key, r.title, descriptions, stencilNames);
                 return (
                   <div
                     key={r.family_key}
@@ -777,7 +1216,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
           <input className="input" style={{ width: "100%" }} placeholder="Name oder Katalogcode" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Bibliothek durchsuchen" />
           {results.map((f) => {
             const fam = f.key;
-            const text = describe(fam, f.title, descriptions);
+            const text = describe(fam, f.title, descriptions, stencilNames);
             const twice = inLegend(doc, fam, f.representative.key);
             return (
               <button
@@ -793,6 +1232,55 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
               </button>
             );
           })}
+
+          <div className="section">Benutzerschablone{stencil?.nova ? ` · Nova ${stencil.nova}` : ""}</div>
+          {stencil && !stencil.sets.length && (
+            <p className="hint" style={{ wordBreak: "break-all" }}>
+              {stencil.found ? "Im Ordner liegt keine lesbare Schablone (.n5q)." : "Ordner nicht gefunden."} {stencil.folder}
+              <br />Pfad ändern: Einstellungen → Benutzerschablonen.
+            </p>
+          )}
+          {stencil?.sets.map((sset, si) => (
+            <div key={`${sset.name}${si}`} className="stencil-set">
+              <div className="stencil-set-name" title={sset.description}>{sset.name}</div>
+              {sset.tabs.map((tab, ti) => {
+                const id = `${si}:${ti}`;
+                const open = stencilTab === id;
+                return (
+                  <div key={id}>
+                    <button className={`outline-row stencil-tab ${open ? "active" : ""}`} aria-expanded={open}
+                      onClick={() => setStencilTab(open ? null : id)} title={tab.description}>
+                      <span className="fold-btn" aria-hidden>{open ? "▾" : "▸"}</span>
+                      <span className="outline-text">{tab.name}</span>
+                      <span className="hint">{tab.entries.length}</span>
+                    </button>
+                    {open && tab.entries.map((e, k) =>
+                      e.symbol_key ? (
+                        <button key={k} className="outline-item add" onClick={() => addFromStencil(e)}
+                          title={`${e.name}${e.item ? ` · ${e.item}` : ""}${e.description ? ` · ${e.description}` : ""}`}
+                          {...dragProps({ type: "add", family_key: e.family_key, symbol_key: e.symbol_key, text: describe(e.family_key, e.name, descriptions, {}), categories: e.categories })}>
+                          <SymIcon r={symbols[symbolRequestKey({ symbol_key: e.symbol_key, length_mm: null, width_mm: null })]} />
+                          <span className="outline-text">{e.name}</span>
+                          {e.family_key && inLegend(doc, e.family_key, e.symbol_key) && <span className="badge warn">doppelt</span>}
+                        </button>
+                      ) : (
+                        <div key={k} className="outline-item add disabled"
+                          title={e.macro ? `Makro: ${e.macro}. Makros lassen sich noch nicht in die Legende ziehen.` : "Ohne Katalogsymbol: nicht in der Bibliothek."}>
+                          {e.macro && e.macro_found ? (
+                            <img className="sym-icon" src={api.macroPreviewUrl(projectId, e.macro)} alt="" />
+                          ) : (
+                            <span className="sym-icon empty" aria-hidden />
+                          )}
+                          <span className="outline-text">{e.name}</span>
+                          <span className="badge">{e.macro ? "Makro" : "kein Symbol"}</span>
+                        </div>
+                      ),
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </aside>
 
         <div
@@ -803,7 +1291,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
             if (!dragPayload.current) return;
             e.preventDefault();
             const t = sheetTargetAt(e.clientX, e.clientY);
-            if (t?.block !== dropAt?.block || t?.before !== dropAt?.before) setDropAt(t);
+            if (t?.block !== dropAt?.block || t?.before !== dropAt?.before || t?.cell !== dropAt?.cell) setDropAt(t);
           }}
           onDragLeave={(e) => {
             if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) setDropAt(null);
@@ -815,6 +1303,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
           }}
         >
           <svg
+            ref={paperRef}
             className="legend-paper"
             viewBox={`0 0 ${W} ${H}`}
             width={W * zoom}
@@ -824,27 +1313,78 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
           >
             <rect width={W} height={H} fill="#fff" />
             {/* section backgrounds, then the grid above the paper, then everything else */}
-            {(placed?.prims ?? [])
+            {(shown?.prims ?? [])
               .filter((p) => p.t === "rect" && p.role === "background")
               .map((p, i) => (
-                <Prim key={`bg${i}`} p={p} symbols={symbols} general={general} sel={sel} stale={stale} dups={dups} onSelect={setSel} />
+                <Prim key={`bg${i}`} p={p} symbols={symbols} general={general} sel={sel} pick={pick?.item} stale={stale} dups={dups} onSelect={selectOnSheet} />
               ))}
-            {showGrid && (placed?.prims ?? []).filter((p) => p.t === "grid").map((g) => <GridLines key={`g${g.block}`} g={g} />)}
-            {(placed?.prims ?? [])
-              .filter((p) => !(p.t === "rect" && p.role === "background") && p.t !== "grid")
-              .map((p, i) => (
-                <Prim key={i} p={p} symbols={symbols} general={general} sel={sel} stale={stale} dups={dups} onSelect={setSel} onDragStart={startSheetDrag} />
-              ))}
-            {dropAt && placed && <DropMarker placed={placed} target={dropAt} doc={doc} />}
+            {showGrid && (shown?.prims ?? []).filter((p) => p.t === "grid").map((g) => <GridLines key={`g${g.block}`} g={g} />)}
+            {groupByEntry((shown?.prims ?? []).filter((p) => !(p.t === "rect" && p.role === "background") && p.t !== "grid")).map((g, i) =>
+              g.item ? (
+                // one group per entry, keyed by its id: it glides to a new place (see the FLIP effect)
+                <g key={`e:${g.item}`} data-entry={g.item} className="lg-entry">
+                  {g.prims.map((p, j) => (
+                    <Prim key={j} p={p} symbols={symbols} general={general} sel={sel} pick={pick?.item} stale={stale} dups={dups} onSelect={selectOnSheet} onDragStart={startSheetDrag} />
+                  ))}
+                </g>
+              ) : (
+                <Prim key={`p${i}`} p={g.prims[0]} symbols={symbols} general={general} sel={sel} pick={pick?.item} stale={stale} dups={dups} onSelect={selectOnSheet} onDragStart={startSheetDrag} />
+              ),
+            )}
+            {dropAt && dropAt.cell !== undefined && preview && <DropCell layout={preview.layout} id={preview.id} />}
+            {dropAt && dropAt.cell === undefined && placed && <DropMarker placed={placed} target={dropAt} doc={doc} />}
           </svg>
         </div>
 
         <aside className={`legend-props ${detached ? "floating" : ""}`}>
+        <div className="props-export">
+        <button className="btn small" disabled={busy || saveState === "saving"} onClick={() => { void saveLegend(); }}
+          title="Die Legende jetzt speichern. Änderungen werden sonst kurz danach von selbst gespeichert.">
+          {saveState === "saving" ? "Speichert …" : "Legende speichern"}
+        </button>
+        <p className={`hint props-save-state ${saveState === "error" ? "dirty" : ""}`} role="status">
+          {saveState === "error"
+            ? "Nicht gespeichert"
+            : savedInfo
+              ? `Gespeichert ${savedInfo}`
+              : "Wird auch automatisch gespeichert."}
+        </p>
+        {!bar.has("export") && (
+          <button className="btn small primary" disabled={busy || exporting} onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}
+            title={exportBlock ? "Den in den Exportoptionen gewählten Abschnitt als DXF herunterladen" : "Die ganze Legende als DXF herunterladen"}>
+            <Icon name="download" size={16} /> {exporting ? "Exportiert …" : "DXF herunterladen"}
+          </button>
+        )}
+        </div>
           {sel?.type === "general" ? (
-            <GeneralProps general={general} company={info.company} />
+            <GeneralProps doc={doc} general={general} company={info.company} change={change} />
+          ) : sel?.type === "general-row" ? (
+            <GeneralRowProps
+              row={general?.rows?.find((r) => r.id === sel.id) ?? null}
+              admin={info.company.is_admin}
+              onSave={async (patch) => {
+                const row = general?.rows?.find((r) => r.id === sel.id);
+                if (!row?.key) return;
+                await api.saveGeneralRow({ key: row.key, ...patch });
+                const g = await api.legendGeneral(projectId);
+                setGeneral(g);
+                setGeneralRev((n) => n + 1);
+              }}
+              notify={notify}
+            />
           ) : sel?.type === "title" ? (
             <TitleProps doc={doc} field={field} change={change} />
           ) : selItem && selBlock ? (
+            <>
+            {pick && (
+              <CombineBox doc={doc} first={selItem} second={pick}
+                onCombine={() => {
+                  change(combineItems(doc, { block: selBlock.id, item: selItem.id }, pick));
+                  setPick(null);
+                  notify("Zu einem Eintrag kombiniert. «Trennen» macht wieder einzelne Einträge daraus.");
+                }}
+                onCancel={() => setPick(null)} />
+            )}
             <ItemProps
               item={selItem}
               block={selBlock}
@@ -852,12 +1392,18 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
               render={selItem.kind === "symbol" ? symbols[symbolRequestKey(selItem)] : undefined}
               stale={stale.has(selItem.id)}
               duplicate={dups.has(selItem.id)}
-              onRotate={() => change(rotateItem(doc, selBlock.id, selItem.id))}
+              onRotate={(step) => change(rotateItem(doc, selBlock.id, selItem.id, step))}
+              onMirror={() => change(updateItem(doc, selBlock.id, selItem.id, { mirror: !selItem.mirror }))}
               templateTexts={info.template_texts}
               field={field}
               change={change}
               notify={notify}
+              companyText={companyKey(selItem) ? descriptions[companyKey(selItem)!] ?? null : null}
               onDescription={(fam, text) => setInfo((i) => (i ? { ...i, descriptions: { ...i.descriptions, [fam]: text } } : i))}
+              companySymbol={selItem.family_key ? companySymbols[selItem.family_key] ?? null : null}
+              onCompanySymbols={(symbols, fam, text) => setInfo((i) => (i ? {
+                ...i, company_symbols: symbols, descriptions: text ? { ...i.descriptions, [fam]: text } : i.descriptions,
+              } : i))}
               onMoveTo={(to) => {
                 change(moveItemToBlock(doc, selBlock.id, selItem.id, to));
                 setSel({ type: "item", block: to, item: selItem.id });
@@ -865,6 +1411,7 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
               onMove={moveSelected}
               onRemove={removeSelected}
             />
+            </>
           ) : sel?.type === "block" && selBlock ? (
             <BlockProps block={selBlock} field={field} change={change} doc={doc} onMove={moveSelected} onRemove={removeSelected} catTitle={catTitle} templateTexts={info.template_texts} />
           ) : (
@@ -898,6 +1445,7 @@ function Prim({
   symbols,
   general,
   sel,
+  pick,
   stale,
   dups,
   onSelect,
@@ -907,16 +1455,18 @@ function Prim({
   p: LegendPrim;
   symbols: Record<string, SymbolRender>;
   general: (GeneralInfo & { svg: string; prims: LegendPrim[] }) | null;
-  sel: Selection | { type: "general" };
+  sel: Selection;
+  pick?: string;
   stale: Set<string>;
   dups?: Set<string>;
-  onSelect: (s: Selection | { type: "general" }) => void;
+  onSelect: (s: Selection, add?: boolean) => void;
   onDragStart?: (e: ReactPointerEvent, block: string, item: string) => void;
   inert?: boolean;
 }) {
   switch (p.t) {
     case "rect":
       if (p.role === "general") {
+        if (p.rows) return null;                 // drawn row by row (prims "grow")
         if (general?.kind === "dxf" && general.svg)
           return <image x={p.x} y={p.y} width={p.w} height={p.h} href={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(general.svg)}`} preserveAspectRatio="xMinYMin meet" />;
         if (general?.kind === "project")
@@ -937,7 +1487,9 @@ function Prim({
         </text>
       );
     case "line":
-      return <line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} stroke={p.color} strokeWidth={0.35} strokeDasharray={DASH[p.style as LineStyle] || undefined} strokeLinecap="round" pointerEvents="none" />;
+      // the pattern comes from the layout (same rule as the DXF): it stays readable at any size
+      return <line x1={p.x1} y1={p.y1} x2={p.x2} y2={p.y2} stroke={p.color} strokeWidth={0.35}
+        strokeDasharray={(p.dash?.length ? p.dash.join(" ") : DASH[p.style as LineStyle]) || undefined} strokeLinecap="round" pointerEvents="none" />;
     case "half":
       return (
         <g pointerEvents="none">
@@ -946,7 +1498,7 @@ function Prim({
         </g>
       );
     case "symbol": {
-      const r = symbols[symbolRequestKey({ symbol_key: p.key, length_mm: p.length_mm, width_mm: p.width_mm })];
+      const r = symbols[symbolRequestKey({ symbol_key: p.key, length_mm: p.length_mm, width_mm: p.width_mm, flat: Boolean(p.flat) })];
       if (!r?.svg || !r.box)
         return (
           <g pointerEvents="none">
@@ -956,14 +1508,46 @@ function Prim({
         );
       // The drawing keeps its own colours. Its insertion point (ax, ay; Nova y up) sits on the
       // symbol axis; turned around that point, counter-clockwise like the DXF.
+      // Parts without own colour take the section colour (currentColor), areas next to
+      // coloured lines its lighter tone; own colours stay. Mirrored left-right, then turned.
       const ax = p.ax ?? r.box[0] + r.box[2] / 2;
       const ay = p.ay ?? -(r.box[1] + r.box[3] / 2);
+      const color: string = p.color || "#000000";
       return (
         <g
-          transform={`translate(${p.cx} ${p.cy}) rotate(${-(p.rot || 0)}) scale(${p.scale}) translate(${-ax} ${ay})`}
+          transform={`translate(${p.cx} ${p.cy}) rotate(${-(p.rot || 0)}) scale(${(p.mirror ? -1 : 1) * p.scale} ${p.scale}) translate(${-ax} ${ay})`}
           pointerEvents="none"
+          style={{ color, ["--sym-layer" as string]: tint(color, 0.45) }}
           dangerouslySetInnerHTML={{ __html: innerSvg(r.svg) }}
         />
+      );
+    }
+    case "grow": {
+      // one row graphic of the general part. A long stroke is drawn at symbol size and
+      // cut at the tile, so the symbol itself stays as large as the other sections.
+      const r = general?.row_svgs?.[p.row];
+      if (!r) return null;
+      const fullW = Number(p.full_w) || p.w;
+      const fullH = Number(p.full_h) || p.h;
+      const crop = fullW > p.w + 0.05 || fullH > p.h + 0.05;
+      const fx = Number(p.fx) || 0;
+      const fy = Number(p.fy) || 0;
+      const innerX = crop ? -(fx * fullW) : 0;
+      const innerY = crop ? -((1 - fy - p.h / fullH) * fullH) : 0;
+      const graphic = (
+        <svg x={p.x} y={p.y} width={p.w} height={p.h} overflow={crop ? "hidden" : "visible"} pointerEvents="none">
+          <svg x={innerX} y={innerY} width={fullW} height={fullH} viewBox={r.vb} preserveAspectRatio="xMidYMid meet" overflow="visible"
+            dangerouslySetInnerHTML={{ __html: r.svg }} />
+        </svg>
+      );
+      const rot = Number(p.rot) || 0;
+      if (!rot) return graphic;
+      const cx = p.x + p.w / 2;
+      const cy = p.y + p.h / 2;
+      return (
+        <g transform={`translate(${cx} ${cy}) rotate(${-rot}) translate(${-cx} ${-cy})`} pointerEvents="none">
+          {graphic}
+        </g>
       );
     }
     case "hit": {
@@ -972,8 +1556,10 @@ function Prim({
         (p.kind === "item" && sel?.type === "item" && sel.item === p.id) ||
         (p.kind === "block" && sel?.type === "block" && sel.block === p.id) ||
         (p.kind === "general" && sel?.type === "general") ||
+        (p.kind === "general-row" && sel?.type === "general-row" && sel.id === p.id) ||
         (p.kind === "title" && sel?.type === "title");
       const isStale = p.kind === "item" && stale.has(p.id);
+      const picked = p.kind === "item" && pick === p.id;
       const isDup = p.kind === "item" && Boolean(dups?.has(p.id));
       if (p.kind === "section")
         return (
@@ -997,10 +1583,10 @@ function Prim({
           y={p.y}
           width={p.w}
           height={p.h}
-          fill={selected ? "rgba(11,107,203,0.10)" : "transparent"}
-          stroke={selected ? "#0b6bcb" : isDup ? "#e8590c" : isStale ? "#c92a2a" : "none"}
+          fill={selected || picked ? "rgba(11,107,203,0.10)" : "transparent"}
+          stroke={selected || picked ? "#0b6bcb" : isDup ? "#e8590c" : isStale ? "#c92a2a" : "none"}
           strokeWidth={0.3}
-          strokeDasharray={(isStale || isDup) && !selected ? "0.8 0.5" : undefined}
+          strokeDasharray={picked ? "1 0.5" : (isStale || isDup) && !selected ? "0.8 0.5" : undefined}
           className="lg-hit"
           data-hit={p.kind}
           data-block={p.block ?? undefined}
@@ -1008,21 +1594,27 @@ function Prim({
           onPointerDown={p.kind === "item" && onDragStart ? (e) => onDragStart(e, p.block, p.id) : undefined}
           onClick={(e) => {
             e.stopPropagation();
+            const add = e.ctrlKey || e.metaKey || e.shiftKey;
             onSelect(
               p.kind === "item"
                 ? { type: "item", block: p.block, item: p.id }
                 : p.kind === "block"
                   ? { type: "block", block: p.block }
-                  : p.kind === "title"
-                    ? { type: "title" }
-                    : { type: "general" },
+                  : p.kind === "general-row"
+                    ? { type: "general-row", id: p.id }
+                    : p.kind === "title"
+                      ? { type: "title" }
+                      : { type: "general" },
+              add,
             );
           }}
         >
           <title>
             {p.kind === "general"
-              ? "Allgemeinteil (gesperrt)"
-              : isDup
+              ? "Kategorie des Allgemeinteils"
+              : p.kind === "general-row"
+                ? "Anklicken zum Bearbeiten"
+                : isDup
                 ? "doppelt: Dieses Symbol steht schon weiter oben in der Legende"
                 : isStale
                   ? "Kommt in den aktuellen Importen nicht vor"
@@ -1042,24 +1634,86 @@ function Prim({
  *  column edges, symbol axis and text line of every column). From the layout, so the
  *  lines match the entries exactly. */
 function GridLines({ g }: { g: LegendPrim }) {
-  const rows: number[] = [];
-  for (let y = g.y; y <= g.y + g.h + 1e-6; y += g.row) rows.push(y);
+  // one slot per entry (tile or grid row), then the gap between entries
+  const slot: number = g.slot ?? g.row;
+  const gap: number = g.gap ?? 0;
+  const step = slot + gap;
+  const tops: number[] = [];
+  for (let y = g.y; y < g.y + g.h - 1e-6; y += step) tops.push(y);
   const cols = Array.from({ length: g.cols }, (_, c) => g.x + c * g.colw);
+  const tile: number | null = g.tile ?? null;
   return (
-    <g className="lg-grid" stroke="#5b87b5" strokeOpacity={0.45} strokeWidth={0.07} pointerEvents="none" data-step={g.row}>
-      {rows.map((y) => (
-        <line key={`y${y}`} x1={g.x} y1={y} x2={g.x + g.w} y2={y} />
-      ))}
-      {[...cols, g.x + g.w].map((x) => (
-        <line key={`c${x}`} x1={x} y1={g.y} x2={x} y2={g.y + g.h} />
-      ))}
-      {cols.map((x) => (
-        <g key={`a${x}`} strokeDasharray="0.6 0.6">
-          <line x1={x + g.axis} y1={g.y} x2={x + g.axis} y2={g.y + g.h} />
-          <line x1={x + g.text} y1={g.y} x2={x + g.text} y2={g.y + g.h} />
+    <g className="lg-grid" strokeWidth={0.07} pointerEvents="none" data-step={g.row}>
+      <g stroke="#5b87b5" strokeOpacity={0.45}>
+        {tops.map((y) => (
+          <g key={`y${y}`}>
+            <line x1={g.x} y1={y} x2={g.x + g.w} y2={y} />
+            <line x1={g.x} y1={y + slot} x2={g.x + g.w} y2={y + slot} />
+          </g>
+        ))}
+        {[...cols, g.x + g.w].map((x) => (
+          <line key={`c${x}`} x1={x} y1={g.y} x2={x} y2={g.y + g.h} />
+        ))}
+      </g>
+      {gap > 0 && (
+        <g fill="#e8590c" fillOpacity={0.08} stroke="#e8590c" strokeOpacity={0.55} strokeDasharray="0.5 0.4">
+          {tops.slice(0, -1).map((y) => (
+            <rect key={`gap${y}`} x={g.x} y={y + slot} width={g.w} height={gap}>
+              <title>Abstand zwischen Einträgen</title>
+            </rect>
+          ))}
         </g>
-      ))}
+      )}
+      {tile && (
+        <g stroke="#2b8a3e" strokeOpacity={0.5} fill="none">
+          {(g.frames as { x: number; y: number; w: number; h: number }[] | undefined)?.map((r, i) => (
+            <rect key={`f${i}`} x={r.x} y={r.y} width={r.w} height={r.h} />
+          )) ?? cols.flatMap((x) =>
+            tops.map((y) => <rect key={`t${x}-${y}`} x={x + g.axis - tile / 2} y={y + (slot - tile) / 2} width={tile} height={tile} />),
+          )}
+        </g>
+      )}
+      <g stroke="#5b87b5" strokeOpacity={0.45} strokeDasharray="0.6 0.6">
+        {cols.map((x) => (
+          <g key={`a${x}`}>
+            <line x1={x + g.axis} y1={g.y} x2={x + g.axis} y2={g.y + g.h} />
+            <line x1={x + g.text} y1={g.y} x2={x + g.text} y2={g.y + g.h} />
+          </g>
+        ))}
+      </g>
     </g>
+  );
+}
+
+/** Prims in drawing order, the ones of one entry (symbol, texts, hit area) together. */
+function groupByEntry(prims: LegendPrim[]): { item: string | null; prims: LegendPrim[] }[] {
+  const out: { item: string | null; prims: LegendPrim[] }[] = [];
+  const byItem = new Map<string, { item: string | null; prims: LegendPrim[] }>();
+  for (const p of prims) {
+    const item: string | undefined =
+      p.t === "symbol" || (p.t === "hit" && p.kind === "item") ? p.id : p.t === "text" || p.t === "line" || p.t === "half" ? p.item : undefined;
+    if (!item) {
+      out.push({ item: null, prims: [p] });
+      continue;
+    }
+    let g = byItem.get(item);
+    if (!g) {
+      g = { item, prims: [] };
+      byItem.set(item, g);
+      out.push(g);
+    }
+    g.prims.push(p);
+  }
+  return out;
+}
+
+/** The cell a dragged entry will take, in the preview where the others already made room. */
+function DropCell({ layout, id }: { layout: LegendLayout; id: string }) {
+  const c = layout.prims.find((p) => p.t === "cell" && p.id === id);
+  if (!c) return null;
+  return (
+    <rect x={c.x + 0.3} y={c.y + 0.3} width={c.w - 0.6} height={c.h - 0.6} rx={0.8} fill="rgba(11,107,203,0.12)"
+      stroke="#0b6bcb" strokeWidth={0.5} pointerEvents="none" />
   );
 }
 
@@ -1084,9 +1738,23 @@ function DropMarker({ placed, target, doc }: { placed: LegendLayout; target: Dro
 }
 
 /** Small symbol icon for the lists on the left: the same drawing as on the sheet. */
-function SymIcon({ r }: { r?: SymbolRender }) {
+function SymIcon({ r, color = "#000000" }: { r?: SymbolRender; color?: string }) {
   if (!r?.svg || !r.box) return <span className="sym-icon empty" aria-hidden />;
-  return <svg className="sym-icon" viewBox={r.box.join(" ")} aria-hidden dangerouslySetInnerHTML={{ __html: innerSvg(r.svg) }} />;
+  // the icon sits on white: draw it in the section colour (black outside a section),
+  // never in the light text colour of the dark theme
+  return (
+    <svg className="sym-icon" viewBox={r.box.join(" ")} aria-hidden style={{ color, ["--sym-layer" as string]: tint(color, 0.45) }}
+      dangerouslySetInnerHTML={{ __html: innerSvg(r.svg) }} />
+  );
+}
+
+/** Mix a colour with white (share 0 = colour, 1 = white). */
+function tint(color: string, share: number): string {
+  if (!/^#[0-9a-f]{6}$/i.test(color)) return color;
+  return `#${[1, 3, 5]
+    .map((i) => parseInt(color.slice(i, i + 2), 16))
+    .map((c) => Math.round(c + (255 - c) * share).toString(16).padStart(2, "0"))
+    .join("")}`;
 }
 
 function innerSvg(svg: string): string {
@@ -1111,6 +1779,7 @@ function NumberInput({
   label,
   min,
   max,
+  disabled,
   onCommit,
 }: {
   value: number | null;
@@ -1119,6 +1788,7 @@ function NumberInput({
   label?: string;
   min?: number;
   max?: number;
+  disabled?: boolean;
   onCommit: (v: number) => void;
 }) {
   const [text, setText] = useState(value == null ? "" : String(value));
@@ -1141,9 +1811,10 @@ function NumberInput({
       value={text}
       step={step}
       placeholder={placeholder}
+      disabled={disabled}
       onChange={(e) => setText(e.target.value)}
-      onBlur={done}
-      onKeyDown={(e) => e.key === "Enter" && done()}
+      onBlur={() => { if (!disabled) done(); }}
+      onKeyDown={(e) => e.key === "Enter" && !disabled && done()}
     />
   );
 }
@@ -1156,11 +1827,15 @@ function ItemProps({
   stale,
   duplicate,
   onRotate,
+  onMirror,
   templateTexts,
   field,
   change,
   notify,
+  companyText,
   onDescription,
+  companySymbol,
+  onCompanySymbols,
   onMoveTo,
   onMove,
   onRemove,
@@ -1171,18 +1846,57 @@ function ItemProps({
   render?: SymbolRender;
   stale: boolean;
   duplicate: boolean;
-  onRotate: () => void;
+  onRotate: (step: number) => void;
+  onMirror: () => void;
   templateTexts: string[];
   field: FieldFn;
   change: (d: LegendDoc) => void;
   notify: (text: string, error?: boolean) => void;
+  companyText: string | null;
   onDescription: (familyKey: string, text: string) => void;
+  companySymbol: CompanySymbolLook | null;
+  onCompanySymbols: (symbols: Record<string, CompanySymbolLook>, familyKey: string, text: string) => void;
   onMoveTo: (blockId: string) => void;
   onMove: (delta: number) => void;
   onRemove: () => void;
 }) {
   const [suggest, setSuggest] = useState<{ text: string; source: string }[]>([]);
+  const [tab, setTab] = useState(0);
   const set = (patch: Partial<LegendItem>) => change(updateItem(doc, block.id, item.id, patch));
+
+  async function saveCompanyText() {
+    const text = item.text.trim();
+    const key = companyKey(item);
+    if (!key || !text) return;
+    try {
+      await api.setDescription(key, text);
+      onDescription(key, text);
+      notify("Als Firmentext gespeichert. Gilt beim Hinzufügen und bei neuen Vorschlägen in allen Projekten.");
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  }
+
+  const symbolParts = (item.parts ?? []).filter((x) => x.family_key);
+  const sameLook = Boolean(companySymbol) && companySymbol!.symbol_factor === item.symbol_factor
+    && companySymbol!.rotation === (item.rotation || 0) && companySymbol!.mirror === Boolean(item.mirror)
+    && JSON.stringify(companySymbol!.parts.map((x) => x.family_key)) === JSON.stringify(symbolParts.map((x) => x.family_key));
+
+  async function saveCompanySymbol() {
+    if (!item.family_key) return;
+    try {
+      const r = await api.saveCompanySymbol({
+        family_key: item.family_key, text: item.text.trim() || undefined, category: block.category_id || null,
+        symbol_factor: item.symbol_factor, rotation: item.rotation || 0, mirror: Boolean(item.mirror),
+        parts: symbolParts.map((x) => ({ family_key: x.family_key!, symbol_factor: x.symbol_factor, rotation: x.rotation || 0, mirror: Boolean(x.mirror) })),
+      });
+      onCompanySymbols(r.symbols, item.family_key, item.text.trim());
+      notify("Als Firmensymbol gespeichert: Text, Abschnitt, Grösse, Drehung" + (symbolParts.length ? " und Kombination" : "")
+        + " gelten in allen Projekten ab dem nächsten Vorschlag.");
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  }
 
   useEffect(() => {
     let alive = true;
@@ -1198,10 +1912,44 @@ function ItemProps({
   }, [item.id]);
 
   const listId = `lg-texts-${item.id}`;
-  const title = { symbol: "Symbol", line: "Linie", note: "Hinweis", text: "Freier Text" }[item.kind];
+  const title = { symbol: "Symbol", line: "Linie", note: "Hinweis", text: "Freier Text", gap: "Leere Zelle" }[item.kind];
+  const parts = item.parts ?? [];
+  const tabIndex = tab <= parts.length ? tab : 0;
+  const tabs = parts.length ? (
+    <div className="part-tabs" role="tablist" aria-label="Symbole dieses Eintrags">
+      {[item.text, ...parts.map((x) => x.text)].map((t, k) => (
+        <button key={k} role="tab" aria-selected={tabIndex === k} className={`part-tab ${tabIndex === k ? "active" : ""}`}
+          onClick={() => setTab(k)} title={t || `Symbol ${k + 1}`}>
+          {`Text ${k + 1} / Symbol ${k + 1}`}
+        </button>
+      ))}
+    </div>
+  ) : null;
+  const splitBox = parts.length ? (
+    <div className="row" style={{ gap: 6, margin: "6px 0 10px" }}>
+      <span className="hint" style={{ flex: 1 }}>Kombiniert: «{entryText(item)}»</span>
+      <button className="btn small" onClick={() => { setTab(0); change(splitItem(doc, block.id, item.id)); }}
+        title="Jedes Symbol wieder als eigener Eintrag">
+        Trennen
+      </button>
+    </div>
+  ) : null;
+  if (tabIndex > 0) {
+    const k = tabIndex - 1;
+    return (
+      <>
+        <h4>{title}</h4>
+        {tabs}
+        {splitBox}
+        <PartProps part={parts[k]} index={k} item={item} block={block} doc={doc} field={field} change={change} />
+      </>
+    );
+  }
   return (
     <>
       <h4>{title}</h4>
+      {tabs}
+      {splitBox}
       {item.kind === "text" && <p className="hint">{FREE_TEXT_HINT}</p>}
       {stale && <p className="warn-text">Dieser Apparat kommt in den aktuellen Importen nicht vor.</p>}
       {duplicate && <p className="warn-text">doppelt: Dieses Symbol steht schon weiter oben in der Legende.</p>}
@@ -1213,8 +1961,11 @@ function ItemProps({
           </button>
         </div>
       )}
+      {item.kind === "symbol" && !parts.length && (
+        <p className="hint">Strg+Klick auf ein zweites Kästchen: beide zu einem Eintrag kombinieren, z. B. «Decke / Wand».</p>
+      )}
       <label className="field">
-        <span>{item.kind === "text" ? "Text" : "Beschreibung"}</span>
+        <span>{item.kind === "text" ? "Text" : parts.length ? "Text 1" : "Beschreibung"}</span>
         <input className="input" list={listId} value={item.text} {...field((d, v) => updateItem(d, block.id, item.id, { text: v }))} />
         <datalist id={listId}>
           {[...suggest.map((s) => s.text), ...templateTexts].filter((t, i, a) => a.indexOf(t) === i).map((t) => (
@@ -1232,28 +1983,38 @@ function ItemProps({
           ))}
         </div>
       )}
-      {item.kind === "symbol" && item.family_key && (
-        <button
-          className="btn small"
-          onClick={async () => {
-            try {
-              await api.setDescription(item.family_key!, item.text);
-              onDescription(item.family_key!, item.text);
-              notify("Als Firmentext gespeichert (gilt beim Hinzufügen und bei neuen Vorschlägen in allen Projekten)");
-            } catch (e) {
-              notify((e as Error).message, true);
-            }
-          }}
-        >
-          Als Firmentext speichern
-        </button>
+      {companyKey(item) && (
+        <div className={`company-text ${companyText !== null && companyText === item.text.trim() ? "is-company" : ""}`}>
+          {companyText !== null && companyText === item.text.trim() ? (
+            <span className="company-state">✓ Das ist der Firmentext</span>
+          ) : companyText !== null ? (
+            <>
+              <span className="company-state">Firmentext: «{companyText}»</span>
+              <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+                <button className="btn small" onClick={() => set({ text: companyText })} title="Den Firmentext in diesen Eintrag übernehmen">
+                  Firmentext übernehmen
+                </button>
+                <button className="btn small" onClick={saveCompanyText} title="Den Text dieses Eintrags als neuen Firmentext speichern, für alle Projekte">
+                  Diesen Text als Firmentext
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <span className="company-state muted">Noch kein Firmentext. Der Text kommt aus der Schablone.</span>
+              <button className="btn small" onClick={saveCompanyText} title="Gilt beim Hinzufügen und bei neuen Vorschlägen in allen Projekten">
+                Als Firmentext speichern
+              </button>
+            </>
+          )}
+        </div>
       )}
       <div className="form two">
         <label className="field">
           <span>Textgrösse (Faktor)</span>
           <NumberInput label="Textgrösse Faktor" value={item.text_scale ?? 1} step={0.1} onCommit={(v) => set({ text_scale: Math.max(0.5, Math.min(3, v)) })} />
         </label>
-        {item.kind === "symbol" && (
+        {(item.kind === "symbol" || item.kind === "note" || item.kind === "line") && (
           <label className="field">
             <span>Symbolgrösse (Faktor)</span>
             <NumberInput label="Symbolgrösse Faktor" value={item.symbol_factor ?? 1} step={0.1} onCommit={(v) => set({ symbol_factor: Math.max(0.3, Math.min(4, v)) })} />
@@ -1261,16 +2022,75 @@ function ItemProps({
         )}
         {item.kind === "symbol" && (
           <div className="field">
-            <span>Drehung {item.rotation || 0}°</span>
-            <button className="btn small" onClick={onRotate} title="Symbol um 90 Grad um seinen Mittelpunkt drehen. Der Text bleibt waagrecht.">
-              ↻ 90° drehen
-            </button>
+            <span>
+              Drehung {item.rotation || 0}°{item.mirror ? " · gespiegelt" : ""}
+            </span>
+            <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+              <button className="btn small" onClick={() => onRotate(45)} title="Um 45 Grad drehen. Der Text bleibt waagrecht.">
+                ↻ 45°
+              </button>
+              <button className="btn small" onClick={() => onRotate(90)} title="Um 90 Grad drehen. Der Text bleibt waagrecht.">
+                ↻ 90°
+              </button>
+              <button className={`btn small ${item.mirror ? "primary" : ""}`} aria-pressed={Boolean(item.mirror)} onClick={onMirror} title="Links-rechts spiegeln">
+                ⇋ Spiegeln
+              </button>
+            </div>
           </div>
         )}
       </div>
       <p className="hint">
         Faktor 1 = gemeinsame Schriftgrösse bzw. gemeinsamer Symbolmassstab. 1,2 macht nur diesen Eintrag grösser, die Zeile wächst um ganze Rasterzeilen.
       </p>
+      {(item.kind === "symbol" || item.kind === "line" || item.kind === "note") && (
+        <div className="field">
+          <span>Symbolfarbe</span>
+          <div className="row" style={{ gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            <input
+              type="color"
+              aria-label="Symbolfarbe"
+              value={item.symbol_color || item.color || block.style.symbol || "#000000"}
+              onChange={(e) => set({ symbol_color: e.target.value })}
+            />
+            <button
+              className="btn small"
+              onClick={() => set({ symbol_color: block.style.symbol })}
+              title="Das ganze Symbol in der Farbe dieses Abschnitts zeichnen"
+            >
+              Farbe von Abschnitt übernehmen
+            </button>
+            {item.symbol_color && (
+              <button className="btn small" onClick={() => set({ symbol_color: "" })} title="Zurück zur automatischen Farbe">
+                Automatisch
+              </button>
+            )}
+          </div>
+          <p className="hint">
+            Automatisch bleiben Schwarz, Grau und Weiss in der Abschnittsfarbe. Eine eigene Farbe im Symbol, zum Beispiel Rot, bleibt.
+            Eine gewählte Farbe oder «Farbe von Abschnitt übernehmen» färbt das ganze Symbol.
+          </p>
+        </div>
+      )}
+      {item.kind === "symbol" && item.family_key && (
+        <div className={`company-text ${sameLook ? "is-company" : ""}`}>
+          {sameLook ? (
+            <span className="company-state">✓ Firmensymbol: so erscheint es in allen Projekten</span>
+          ) : (
+            <span className="company-state muted">
+              {companySymbol ? "Firmensymbol gespeichert, diese Legende weicht davon ab." : "Noch kein Firmensymbol."}
+            </span>
+          )}
+          {!sameLook && (
+            <button className="btn small" onClick={saveCompanySymbol}
+              title={`Text, Abschnitt «${block.title}», Grösse, Drehung, Spiegeln${symbolParts.length ? " und die kombinierten Symbole" : ""} für alle Projekte speichern. Die Farbe kommt weiter aus dem Plan.`}>
+              Als Firmensymbol speichern
+            </button>
+          )}
+        </div>
+      )}
+      {item.kind === "symbol" && item.family_key && (
+        <CompanyCategoryField key={`${item.family_key}|${companySymbol?.at ?? ""}`} familyKey={item.family_key} notify={notify} />
+      )}
       {item.kind === "symbol" && render?.engine && (
         <div className="form two">
           <label className="field">
@@ -1418,10 +2238,10 @@ function BlockProps({
 function TitleProps({ doc, field, change }: { doc: LegendDoc; field: FieldFn; change: (d: LegendDoc) => void }) {
   const t = doc.title;
   const set = (patch: Partial<LegendDoc["title"]>) => change({ ...doc, title: { ...t, ...patch } });
-  const mm = t.size_mm > 0 ? t.size_mm : Math.round(doc.style.text_size * (t.scale ?? 1) * 100) / 100;
+  const mm = t.size_mm > 0 ? t.size_mm : 5;
   return (
     <>
-      <h4>Titel</h4>
+      <h4>Titel <InfoTip text="Grösse, Farbe und Schriftart gelten nur für den Titel." /></h4>
       <label className="field">
         <span>Text</span>
         <input className="input" value={t.text} {...field((d, v) => ({ ...d, title: { ...d.title, text: v } }))} />
@@ -1442,7 +2262,6 @@ function TitleProps({ doc, field, change }: { doc: LegendDoc; field: FieldFn; ch
           <option value="Verdana">Verdana</option>
         </select>
       </label>
-      <p className="hint">Titelgrösse, Farbe und Schriftart gelten nur für den Titel, nicht für die Einträge.</p>
       <div className="color-grid">
         <label className="color-field">
           <input type="color" value={t.color || "#000000"} onChange={(e) => set({ color: e.target.value })} aria-label="Farbe Titel" />
@@ -1458,24 +2277,149 @@ function TitleProps({ doc, field, change }: { doc: LegendDoc; field: FieldFn; ch
   );
 }
 
-function GeneralProps({ general, company }: { general: (GeneralInfo & { svg: string }) | null; company: LegendInfo["company"] }) {
+function generalSectionOf(doc: LegendDoc): GeneralSection {
+  return doc.general_section ?? { title: "Allgemein", header: "#1c7ed6", header_text: "#ffffff", title_scale: 1 };
+}
+
+function GeneralProps({
+  doc,
+  general,
+  company,
+  change,
+}: {
+  doc: LegendDoc;
+  general: (GeneralInfo & { svg: string }) | null;
+  company: LegendInfo["company"];
+  change: (d: LegendDoc) => void;
+}) {
+  const section = generalSectionOf(doc);
+  const set = (patch: Partial<GeneralSection>) => change({ ...doc, general_section: { ...section, ...patch } });
   return (
     <>
-      <h4>Allgemeinteil (gesperrt)</h4>
-      <p className="hint">Steht in jeder Legende zuoberst.</p>
-      <p className="hint">Verknüpft ist eine DXF- oder DWG-Datei auf dem Server.</p>
-      <p className="hint">Die Datei wird nur an die Blattbreite angepasst.</p>
-      <p className="hint">Kachelgrösse, Schrift und Abstand gelten für die erzeugten Einträge, nicht für diese Zeichnung.</p>
-      <p className="hint">Einträge darin lassen sich nicht ziehen. N4D wird für diese Verknüpfung nicht gelesen.</p>
+      <h4>
+        Allgemein
+        <InfoTip text={"Kategorie über dem Allgemeinteil, wie die anderen Abschnitte.\nEine Zeile anklicken, um Text und Grösse zu ändern. Eine Zwischenüberschrift wie «Farbcodes» sitzt unten auf der Rasterlinie.\nDie Zeichnung selbst bleibt die Firmenvorlage. N4D wird nicht gelesen."} />
+      </h4>
+      <label className="field">
+        <span>Kategorientitel</span>
+        <input className="input" aria-label="Kategorientitel Allgemeinteil" value={section.title} onChange={(e) => set({ title: e.target.value })} />
+      </label>
+      <div className="color-grid">
+        <label className="color-field">
+          <input type="color" value={section.header} onChange={(e) => set({ header: e.target.value })} aria-label="Farbe Kopfleiste Allgemeinteil" />
+          <span>Kopfleiste</span>
+        </label>
+        <label className="color-field">
+          <input type="color" value={section.header_text} onChange={(e) => set({ header_text: e.target.value })} aria-label="Schriftfarbe Kopfleiste Allgemeinteil" />
+          <span>Schrift</span>
+        </label>
+      </div>
+      <label className="field">
+        <span>Textgrösse Überschrift (Faktor)</span>
+        <NumberInput value={section.title_scale} step={0.1} onCommit={(v) => set({ title_scale: Math.max(0.5, Math.min(3, v)) })} />
+      </label>
       <dl className="kv">
         <dt>Quelle</dt>
         <dd style={{ wordBreak: "break-all" }}>{general?.source || "–"}</dd>
-        <dt>Grösse</dt>
-        <dd>{general ? `${general.w} × ${general.h} mm` : "–"}</dd>
         <dt>Admins</dt>
-        <dd>{company.admins.join(", ") || "noch keine"}</dd>
+        <dd>
+          {company.is_admin && company.admins.length > 0 && <span className="admin-badge on">Du bist Admin</span>}
+          {company.admins.length ? company.admins.map((name) => (
+            <span key={name} className="admin-chip">★ {name}{name.toLocaleLowerCase("de-CH") === company.user.toLocaleLowerCase("de-CH") ? " (du)" : ""}</span>
+          )) : "noch keine"}
+        </dd>
       </dl>
-      <p className="hint">Den Pfad ändern nur Admins unter Einstellungen → Legende der Firma.</p>
+    </>
+  );
+}
+
+function GeneralRowProps({
+  row,
+  admin,
+  onSave,
+  notify,
+}: {
+  row: { id: string; key?: string; text: string; heading: boolean; text_scale?: number; symbol_factor?: number; rotation?: number; text_place?: "top" | "middle" | "bottom"; line?: boolean; picture?: "line" | "swatch" | "symbol" } | null;
+  admin: boolean;
+  onSave: (patch: { text?: string; text_scale?: number; symbol_factor?: number; rotation?: number; text_place?: "top" | "middle" | "bottom" }) => Promise<void>;
+  notify: (text: string, error?: boolean) => void;
+}) {
+  const [text, setText] = useState(row?.text ?? "");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setText(row?.text ?? ""); }, [row?.id, row?.text]);
+  if (!row) return <p className="hint">Zeile nicht gefunden.</p>;
+  async function save(patch: { text?: string; text_scale?: number; symbol_factor?: number; rotation?: number; text_place?: "top" | "middle" | "bottom" }) {
+    setBusy(true);
+    try {
+      await onSave(patch);
+      notify("Zeile gespeichert. Gilt in allen Legenden.");
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <h4>{row.heading ? "Zwischenüberschrift" : "Zeile im Allgemeinteil"}</h4>
+      <p className="hint">
+        {row.heading
+          ? "Zwischenüberschrift ohne Symbol, zum Beispiel «Farbcodes». Die Lage in der Rasterzeile stellst du unten ein."
+          : row.picture === "swatch"
+            ? "Ein Farbcode wird als gleich grosses Farbfeld gezeichnet. Der Text steht daneben."
+            : row.line
+              ? "Eine Linie bleibt immer gleich lang, damit Strich, Punkt und Farbe lesbar bleiben. Die Symbolgrösse ändert sie nicht."
+              : "Das Symbol wird vollständig in die Kachel gesetzt, ohne Führungslinie und ohne Beschriftung aus der Vorlage. Der Text bleibt waagrecht."}
+        {admin ? " Die Änderung gilt in allen Projekten." : " Nur Admins können das ändern."}
+      </p>
+      <label className="field">
+        <span>Text</span>
+        <input className="input" aria-label="Text der Allgemeinteil-Zeile" value={text} disabled={!admin || busy} onChange={(e) => setText(e.target.value)}
+          onBlur={() => { if (admin && text.trim() && text !== row.text) save({ text }); }} />
+      </label>
+      <div className="form two">
+        <label className="field">
+          <span>Textgrösse (Faktor)</span>
+          <NumberInput label="Textgrösse Faktor Allgemeinteil" value={row.text_scale ?? 1} step={0.1} disabled={!admin}
+            onCommit={(v) => save({ text_scale: Math.max(0.5, Math.min(3, v)) })} />
+        </label>
+        {!row.heading && !row.line && row.picture !== "swatch" && (
+          <label className="field">
+            <span>Symbolgrösse (Faktor)</span>
+            <NumberInput label="Symbolgrösse Faktor Allgemeinteil" value={row.symbol_factor ?? 1} step={0.1} disabled={!admin}
+              onCommit={(v) => save({ symbol_factor: Math.max(0.5, Math.min(2, v)) })} />
+          </label>
+        )}
+      </div>
+      {row.heading && (
+        <label className="field">
+          <span>Lage in der Zeile</span>
+          <select className="select" aria-label="Lage der Zwischenüberschrift" value={row.text_place || "bottom"} disabled={!admin || busy}
+            onChange={(e) => save({ text_place: e.target.value as "top" | "middle" | "bottom" })}>
+            <option value="top">Oben</option>
+            <option value="middle">Mittig</option>
+            <option value="bottom">Unten</option>
+          </select>
+        </label>
+      )}
+      {!row.heading && !row.line && row.picture !== "swatch" && (
+        <div className="field">
+          <span>Drehung {row.rotation || 0}°</span>
+          <div className="row" style={{ gap: 4, flexWrap: "wrap" }}>
+            <button className="btn small" disabled={!admin || busy} onClick={() => save({ rotation: ((row.rotation || 0) + 45) % 360 })} title="Um 45 Grad drehen. Der Text bleibt waagrecht.">
+              ↻ 45°
+            </button>
+            <button className="btn small" disabled={!admin || busy} onClick={() => save({ rotation: ((row.rotation || 0) + 90) % 360 })} title="Um 90 Grad drehen. Der Text bleibt waagrecht.">
+              ↻ 90°
+            </button>
+            {(row.rotation || 0) !== 0 && (
+              <button className="btn small" disabled={!admin || busy} onClick={() => save({ rotation: 0 })}>
+                Zurück
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </>
   );
 }
@@ -1507,14 +2451,17 @@ function DocProps({
   setExportGeneral: (v: boolean) => void;
   hasGeneral: boolean;
   exporting: boolean;
-  onExport: (format: "dxf" | "dwg", block: string, withGeneral: boolean) => void;
+  onExport: (format: "dxf" | "dwg" | "pdf", block: string, withGeneral: boolean) => void;
 }) {
   const s = doc.style;
   const company = info.company;
+  const tileMm = String(Math.round(s.text_size * 3.6 * s.symbol_scale * 10) / 10).replace(".", ",");
+  const sizeTip = (s.symbol_size ?? "tile") === "real"
+    ? "Jedes Symbol im gemeinsamen Massstab, Einfügepunkt auf der Achse. Ein grosses Symbol belegt mehr Zeilen."
+    : `Kachel ${tileMm} mm, aus der Schriftgrösse. Jedes Symbol füllt 75 % davon.`;
   return (
     <>
-      <h4>Legende</h4>
-      <p className="hint">Klicke auf einen Eintrag oder eine Kopfleiste, um sie zu bearbeiten. Einträge ziehst du mit der Maus an einen anderen Platz, ↑ ↓ geht auch.</p>
+      <h4>Legende <InfoTip text="Eintrag oder Kopfleiste anklicken. Ziehen oder ↑ ↓ verschiebt." /></h4>
       <label className="field">
         <span>Titel</span>
         <input className="input" value={doc.title.text} {...field((d, v) => ({ ...d, title: { ...d.title, text: v } }))} />
@@ -1529,44 +2476,62 @@ function DocProps({
           <NumberInput label="Symbolmassstab" value={s.symbol_scale} step={0.1} onCommit={(v) => setStyle({ symbol_scale: Math.max(0.2, Math.min(5, v)) })} />
         </label>
         <label className="field">
-          <span>Abstand zwischen Abschnitten (mm)</span>
+          <span>Abschnitte (mm)</span>
           <NumberInput label="Abstand zwischen Abschnitten" value={s.section_gap ?? 0} step={0.5} onCommit={(v) => setStyle({ section_gap: Math.max(0, Math.min(50, v)) })} />
         </label>
         <label className="field">
-          <span>Abstand zwischen den Kacheln (mm)</span>
-          <NumberInput label="Abstand zwischen den Kacheln" value={s.entry_gap ?? 0} step={0.5} onCommit={(v) => setStyle({ entry_gap: Math.max(0, Math.min(20, v)) })} />
+          <span>Symbolgrösse <InfoTip text={sizeTip} /></span>
+          <select className="select" aria-label="Symbolgrösse" value={s.symbol_size ?? "tile"} onChange={(e) => setStyle({ symbol_size: e.target.value as "real" | "tile" })}>
+            <option value="tile">Gleiche Kacheln</option>
+            <option value="real">Echte Grösse</option>
+          </select>
+        </label>
+        {(s.symbol_size ?? "tile") === "tile" && (
+          <label className="toggle field" style={{ alignSelf: "end" }}>
+            <input type="checkbox" checked={s.normalize_size !== false}
+              onChange={(e) => setStyle({ normalize_size: e.target.checked })} />
+            Gleiche Fläche <InfoTip text="Jedes Symbol bekommt dieselbe Fläche, höchstens 75 % der Kachel. Ein Kreis wirkt so nicht grösser als ein langer Balken. Aus: die längere Seite füllt 75 % der Kachel." />
+          </label>
+        )}
+        <label className="field">
+          <span>Einträge (mm)</span>
+          <NumberInput label="Abstand zwischen Einträgen" value={s.entry_gap ?? 0} step={0.5} onCommit={(v) => setStyle({ entry_gap: Math.max(0, Math.min(20, v)) })} />
         </label>
         <label className="field">
-          <span>Textzeilen</span>
+          <span>Textzeilen <InfoTip text="«Automatisch» bricht langen Text um, die Zeile wird höher. 1 bis 3 Zeilen halten alle Einträge gleich hoch." /></span>
           <select className="select" aria-label="Textzeilen" value={String(s.text_lines ?? 0)} onChange={(e) => setStyle({ text_lines: Number(e.target.value) })}>
             <option value="0">Automatisch</option>
-            <option value="1">1 Zeile, gleiche Höhe</option>
-            <option value="2">2 Zeilen, gleiche Höhe</option>
-            <option value="3">3 Zeilen, gleiche Höhe</option>
+            <option value="1">1 Zeile</option>
+            <option value="2">2 Zeilen</option>
+            <option value="3">3 Zeilen</option>
           </select>
         </label>
         <label className="field">
-          <span>Blattbreite (mm)</span>
+          <span>
+            Blattbreite (mm)
+            <InfoTip text={`Inkl. 5 mm Rand. Standard 200 mm, höchstens 210 mm. Firmen-Standard: Schrift ${String(company.text_size).replace(".", ",")} mm, Massstab ${String(company.symbol_scale).replace(".", ",")}.`} />
+          </span>
           <NumberInput label="Blattbreite" value={s.width} step={5} min={80} max={210} onCommit={(v) => setStyle({ width: v })} />
         </label>
       </div>
-      <label className="toggle" style={{ color: "var(--fg)" }}>
-        <input type="checkbox" checked={Boolean(s.strip_fill)} onChange={(e) => setStyle({ strip_fill: e.target.checked })} />
-        Symbol-Hintergründe/Schraffuren entfernen
-      </label>
-      <p className="hint">
-        Jede Symbolkachel ist {String(Math.round(s.text_size * 3.6 * s.symbol_scale * 10) / 10).replace(".", ",")} mm gross.
-        Die Kante folgt der Schriftgrösse und dem Symbolmassstab. Langfeldleuchten behalten ihr Seitenverhältnis und füllen dieselbe Kachel.
-        Der Abstand gilt zwischen den Kacheln. Bei «Automatisch» bleibt der Text auf einer Zeile.
-      </p>
-      <p className="hint">
-        Blattbreite inkl. 5 mm Rand: Standard 200 mm, höchstens 210 mm. Gilt für alle Texte und Symbole dieses Projekts. Firmen-Standard: Schrift {String(company.text_size).replace(".", ",")} mm, Massstab{" "}
-        {String(company.symbol_scale).replace(".", ",")}.
-      </p>
+      <div className="row">
+        <label className="toggle" style={{ color: "var(--fg)" }}>
+          <input type="checkbox" checked={Boolean(s.hatch_off)} onChange={(e) => setStyle({ hatch_off: e.target.checked })} />
+          Weiche Schraffur aus
+        </label>
+        <InfoTip text="Schraffur und helle Fläche hinter Linien. Gilt für alle Symbole in Vorschau, DXF und PDF. Umrisse bleiben." />
+      </div>
+      <div className="row">
+        <label className="toggle" style={{ color: "var(--fg)" }}>
+          <input type="checkbox" checked={Boolean(s.fill_off)} onChange={(e) => setStyle({ fill_off: e.target.checked })} />
+          Volle Flächen aus
+        </label>
+        <InfoTip text="Ganz gefüllte Teile, z. B. Anschlusspunkt oder die halbe Fläche bei AP. Gilt für alle Symbole. Umrisse bleiben." />
+      </div>
       <button
         className="btn small"
         disabled={!company.is_admin}
-        title={company.is_admin ? "Schriftgrösse und Symbolmassstab als Firmen-Standard für neue Projekte speichern" : "Nur Admins aus den Firmeneinstellungen"}
+        title={company.is_admin ? "Schriftgrösse und Symbolmassstab als Firmen-Standard für neue Projekte speichern" : `Nur Admins (${company.admins.join(", ") || "noch keine"})`}
         onClick={async () => {
           try {
             const r = await api.rememberLegend(projectId, doc);
@@ -1580,18 +2545,20 @@ function DocProps({
       >
         Für neue Projekte merken
       </button>
-      {!company.is_admin && <p className="hint">Nur Admins ({company.admins.join(", ")}) dürfen den Firmen-Standard ändern.</p>}
 
       <div className="color-grid">
         <label className="color-field">
           <input type="checkbox" checked={Boolean(s.frame_on)} onChange={(e) => setStyle({ frame_on: e.target.checked })} aria-label="Umrandung der Legende an" />
           <input type="color" value={s.frame || "#000000"} onChange={(e) => setStyle({ frame: e.target.value })} aria-label="Farbe Umrandung der Legende" />
-          <span>Umrandung der ganzen Legende</span>
+          <span>Umrandung</span>
+          <InfoTip text="Rahmen der ganzen Legende. Für den Titel in der Liste «Titel» anklicken." />
         </label>
       </div>
-      <p className="hint">Titel anklicken: Textgrösse, Farbe und Umrandung des Titels.</p>
 
-      <div className="section">Export</div>
+      <div className="section">
+        Export
+        <InfoTip text={"Speichert zuerst die Legende.\nDateiname aus Bezeichnung und Abschnitt.\nPDF ist dieselbe Zeichnung, 1:1 in mm, 10 mm Rand.\nDXF R2013, Truecolor, Symbole als Blöcke. Das Blatt bleibt weiss."} />
+      </div>
       <label className="field">
         <span>Was exportieren</span>
         <select className="select" value={exportBlock} onChange={(e) => setExportBlock(e.target.value)}>
@@ -1603,44 +2570,49 @@ function DocProps({
           ))}
         </select>
       </label>
-      <label className="toggle" style={{ color: "var(--fg)" }}>
-        <input
-          type="checkbox"
-          checked={exportGeneral && hasGeneral}
-          onChange={(e) => {
-            if (!hasGeneral) {
-              notify("Es ist keine Servervorlage für den Allgemeinteil eingestellt. Der Export läuft ohne ihn.", true);
-              return;
-            }
-            setExportGeneral(e.target.checked);
-          }}
-        />
-        Allgemeinteil einschliessen
+      <div className="row">
+        <label className="toggle" style={{ color: "var(--fg)" }}>
+          <input
+            type="checkbox"
+            checked={exportGeneral && hasGeneral}
+            onChange={(e) => {
+              if (!hasGeneral) {
+                notify("Es ist keine Servervorlage für den Allgemeinteil eingestellt. Der Export läuft ohne ihn.", true);
+                return;
+              }
+              setExportGeneral(e.target.checked);
+            }}
+          />
+          Allgemeinteil zeigen
+        </label>
+        <InfoTip text="Gilt für diese Legende: Vorschau, DXF, DWG und PDF. Aus z. B. für eine Legende nur mit UKV. Verknüpfte DXF- oder DWG-Datei unter dem Titel. Hat sie eine Textspalte, nutzt sie Schriftgrösse, Symbolgrösse, Abstand und Spalten dieser Legende. Die Zeichnung bleibt gesperrt. N4D wird nicht gelesen." />
+      </div>
+      <label className="field">
+        <span>Liniendicke im PDF <InfoTip text="Original: jede Linie so dick wie in der Zeichnung. Proportional: ein verkleinertes Symbol bekommt dünnere Linien, ein vergrössertes dickere (0,09 bis 0,5 mm). DXF und DWG behalten die Original-Liniendicke." /></span>
+        <select className="select" aria-label="Liniendicke im PDF" value={s.pdf_lines ?? "original"}
+          onChange={(e) => setStyle({ pdf_lines: e.target.value as "original" | "proportional" })}>
+          <option value="original">Original-Liniendicke</option>
+          <option value="proportional">Proportionale Skalierung der Liniendicke</option>
+        </select>
       </label>
-      <p className="hint">
-        Verknüpft ist eine DXF- oder DWG-Datei.
-        <br />Schriftgrösse, Kachel und Abstand ändern nur die erzeugte Legende darunter.
-        <br />Die Zeichnung bleibt gesperrt. Einträge darin lassen sich nicht ziehen.
-        <br />N4D wird für diese Verknüpfung nicht gelesen.
-      </p>
       <div className="row" style={{ marginTop: 6 }}>
         <button className="btn small" disabled={exporting} onClick={() => onExport("dxf", exportBlock, exportGeneral && hasGeneral)}>
-          DXF exportieren
+          DXF
         </button>
         <button className="btn small" disabled={exporting} onClick={() => onExport("dwg", exportBlock, exportGeneral && hasGeneral)}>
-          DWG exportieren
+          DWG
+        </button>
+        <button className="btn small" disabled={exporting} onClick={() => onExport("pdf", exportBlock, exportGeneral && hasGeneral)}>
+          PDF
         </button>
       </div>
-      <p className="hint">Der Export speichert zuerst die Legende. Dateiname: edeco ag-{"<Bezeichnung>"}-{"<Abschnitt>"}.dxf bzw. …-Legende.dxf.</p>
-      <p className="hint">Die Datei entspricht der Vorschau: DXF R2013, Farben als Truecolor, jedes Symbol als Block. N4D wird nicht geschrieben. Das Blatt bleibt weiss, unabhängig vom Hell- oder Dunkelmodus.</p>
       {!info.oda && (
         <p className="hint">
-          DWG braucht den ODA File Converter. DXF funktioniert ohne.{" "}
-          <a href="https://www.opendesign.com/guestfiles/oda_file_converter" target="_blank" rel="noreferrer">ODA File Converter herunterladen</a>
+          DWG braucht den ODA File Converter.{" "}
+          <a href="https://www.opendesign.com/guestfiles/oda_file_converter" target="_blank" rel="noreferrer">Herunterladen</a>
         </p>
       )}
-      <p className="hint">© 2026 edeco ag. Alle Rechte vorbehalten.</p>
-      <button className="btn small" type="button" onClick={() => exportDiagnostic(projectId, notify)}>Prüfbericht exportieren</button>
+      <button className="btn small" type="button" onClick={() => exportDiagnostic(projectId, notify)}>Prüfbericht</button>
     </>
   );
 }
@@ -1652,4 +2624,123 @@ function round(v: number): number {
 function formatStamp(iso: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/.exec(iso || "");
   return m ? `${m[3]}.${m[2]}. ${m[4]}:${m[5]}` : "";
+}
+
+/** Category of a symbol family for the whole company (as in the symbol library). */
+function CompanyCategoryField({ familyKey, notify }: { familyKey: string; notify: (text: string, error?: boolean) => void }) {
+  const [cats, setCats] = useState<Category[]>([]);
+  const [state, setState] = useState<{ categories: string[]; source: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([api.categories(), api.familyCategories(familyKey)])
+      .then(([c, f]) => {
+        if (!alive) return;
+        setCats(c.items);
+        setState(f);
+      })
+      .catch(() => alive && setState(null));
+    return () => {
+      alive = false;
+    };
+  }, [familyKey]);
+
+  if (!state) return null;
+  const manual = state.source === "manuell";
+  const byId = Object.fromEntries(cats.map((c) => [c.id, c]));
+  const value = manual ? state.categories[0] ?? "" : "";
+  const auto = state.categories.map((id) => byId[id]?.title ?? id).join(", ");
+
+  async function choose(id: string) {
+    setBusy(true);
+    try {
+      const r = await api.setFamilyCategories(familyKey, id ? [id] : null);
+      setState(r);
+      notify(id ? `Kategorie «${byId[id]?.title ?? id}» gespeichert (gilt für die ganze Firma)` : "Kategorie wieder automatisch");
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <label className="field">
+      <span>Kategorie firmenweit</span>
+      <select className="select" value={value} disabled={busy} onChange={(e) => choose(e.target.value)}
+        title="Ordnet dieses Symbol für die ganze Firma einer Kategorie zu, wie in der Symbolbibliothek">
+        <option value="">Automatisch{!manual && auto ? ` (${auto})` : ""}</option>
+        {cats.map((c) => (
+          <option key={c.id} value={c.id}>{c.parent ? `${byId[c.parent]?.title ?? ""} › ` : ""}{c.title}</option>
+        ))}
+      </select>
+      <p className="hint">Wirkt in allen Projekten beim nächsten Vorschlag. Diese Legende bleibt, bis du sie neu vorschlagen lässt.</p>
+    </label>
+  );
+}
+
+/** Two entries chosen: combine the second into the first («Text 1 / Text 2», symbols side by side). */
+function CombineBox({ doc, first, second, onCombine, onCancel }: {
+  doc: LegendDoc;
+  first: LegendItem;
+  second: { block: string; item: string };
+  onCombine: () => void;
+  onCancel: () => void;
+}) {
+  const other = doc.blocks.find((b) => b.id === second.block)?.items.find((x) => x.id === second.item);
+  if (!other) return null;
+  const ok = first.kind === "symbol" && other.kind === "symbol" && (first.parts?.length ?? 0) + 1 + (other.parts?.length ?? 0) <= 3;
+  return (
+    <div className="combine-box" role="region" aria-label="Zwei Einträge gewählt">
+      <b>2 Einträge gewählt</b>
+      <p className="hint">«{entryText(first)}» und «{entryText(other)}» werden ein Eintrag: Symbole nebeneinander, Texte mit « / ».</p>
+      {!ok && <p className="warn-text">Kombinieren geht nur mit Symbolen, höchstens vier pro Eintrag.</p>}
+      <div className="row" style={{ gap: 6 }}>
+        <button className="btn small primary" disabled={!ok} onClick={onCombine}>Kombinieren</button>
+        <button className="btn small" onClick={onCancel}>Abbrechen</button>
+      </div>
+    </div>
+  );
+}
+
+/** Text and symbol of a further part of a combined entry (tab «Text 2 / Symbol 2» ...). */
+function PartProps({ part, index, item, block, doc, field, change }: {
+  part: LegendPart;
+  index: number;
+  item: LegendItem;
+  block: LegendBlock;
+  doc: LegendDoc;
+  field: FieldFn;
+  change: (d: LegendDoc) => void;
+}) {
+  const set = (patch: Partial<LegendPart>) => change(updatePart(doc, block.id, item.id, index, patch));
+  const n = index + 2;
+  return (
+    <>
+      <label className="field">
+        <span>Text {n}</span>
+        <input className="input" value={part.text} {...field((d, v) => updatePart(d, block.id, item.id, index, { text: v }))} />
+      </label>
+      <div className="form two">
+        <label className="field">
+          <span>Symbol {n}: Grösse (Faktor)</span>
+          <NumberInput label={`Grösse Symbol ${n}`} value={part.symbol_factor} step={0.1}
+            onCommit={(v) => set({ symbol_factor: Math.max(0.3, Math.min(4, v)) })} />
+        </label>
+        <div className="field">
+          <span>Symbol {n}: Lage</span>
+          <div className="row" style={{ gap: 4 }}>
+            <button className="btn small" onClick={() => set({ rotation: ((part.rotation || 0) + 90) % 360 })} title="Um 90 Grad drehen">↻ 90°</button>
+            <button className={`btn small ${part.mirror ? "primary" : ""}`} aria-pressed={Boolean(part.mirror)}
+              onClick={() => set({ mirror: !part.mirror })} title="Links-rechts spiegeln">⇋ Spiegeln</button>
+          </div>
+        </div>
+      </div>
+      <button className="btn small" onClick={() => change(detachPart(doc, block.id, item.id, index))}
+        title="Nur dieses Symbol wird wieder ein eigener Eintrag">
+        Symbol {n} herauslösen
+      </button>
+    </>
+  );
 }

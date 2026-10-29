@@ -4,11 +4,13 @@ import { planFiles } from "../floors";
 import { formatDateTime, layerStateText, plansOpen, rememberPlansOpen } from "../uiState";
 import ChangesTab, { changeHint } from "./ChangesTab";
 import LegendEditor from "./LegendEditor";
+import LegendTabs from "./LegendTabs";
 import ImportDialog from "./ImportDialog";
 import ReviewPanel from "./ReviewPanel";
 import Menu from "./Menu";
 import { TrashIcon } from "./Icons";
 import { useNavigation } from "../Navigation";
+import Desc from "./Desc";
 
 interface Props {
   projectId: string;
@@ -33,6 +35,9 @@ export default function ProjectView({ projectId, projects, categories, notify, o
   const loadGeneration = useRef(0);
   const [data, setData] = useState<ProjectDetail | null>(null);
   const [tab, setTab] = useState<Tab>("list");
+  // the selected legend belongs to one project; another project starts with its first legend
+  const [legendSel, setLegendSel] = useState<{ project: string; id: number } | null>(null);
+  const legendId = legendSel?.project === projectId ? legendSel.id : null;
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState<{ files: File[]; planId?: number } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -291,7 +296,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
                 className="btn danger"
                 disabled={busy}
                 aria-label="Projekt nach ‚Gelöscht‘ verschieben"
-                title="Nach ‚Gelöscht‘ verschieben: der Projektordner kommt nach _Geloescht, nichts wird endgültig gelöscht."
+                title="Nach _Geloescht verschieben, nichts geht verloren"
                 onClick={async () => {
                   if (!window.confirm(`Projekt «${data.meta.name}» in den Ordner _Geloescht verschieben? Nichts wird endgültig gelöscht.`)) return;
                   await navigate(async () => {
@@ -378,10 +383,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
             {!plansExpanded && tab !== "legend" && <span className="hint">Dateien hierher ziehen importiert Geschosse (mehrere möglich)</span>}
             {importStatus?.kind === "busy" && <span className="hint">· importiert …</span>}
           </summary>
-          <p className="desc">
-            Ein Plan pro Geschoss. Datei hierher ziehen oder unten wählen. Formate: DXF, N4D und N4M (Nova-Modell), DWG mit ODA File
-            Converter. Geschosse sortierst du durch Ziehen am Griff ⠿ oder mit ↑ ↓.
-          </p>
+          <Desc short="Ein Plan pro Geschoss." more="Datei hierher ziehen oder unten wählen. Formate: DXF, N4D und N4M (Nova-Modell), DWG mit ODA File Converter. Geschosse sortierst du durch Ziehen am Griff ⠿ oder mit ↑ ↓." />
           {plans.length > 0 && (
             <div className="table-scroll">
               <table className="list-table">
@@ -443,7 +445,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
                           <button
                             className="btn small"
                             disabled={busy}
-                            title="Geänderten Plan dieses Geschosses einlesen. Die bisherigen Importe bleiben für den Vergleich erhalten."
+                            title="Neue Version einlesen, die alte bleibt zum Vergleich"
                             onClick={() => {
                               setReimportPlan(p.id);
                               reimportRef.current?.click();
@@ -607,7 +609,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
               <button
                 className="btn small"
                 onClick={() => openTab("changes")}
-                title="Vergleich von Importversionen. Die Zahl zählt geänderte Zeilen zum vorigen Import, über alle Geschosse."
+                title="Geänderte Zeilen zum vorigen Import"
               >
                 Änderungen{changeCount ? ` (${changeCount})` : ""}
               </button>
@@ -741,7 +743,18 @@ export default function ProjectView({ projectId, projects, categories, notify, o
             )}
 
             {tab === "legend" && (
-              <LegendEditor key={projectId} projectId={projectId} data={data} categories={categories} notify={notify} />
+              <section className="legend-workspace" aria-label="Legendeneditor">
+                <header className="legend-workspace-head">
+                  <span className="le-badge" aria-hidden>✎</span>
+                  <h2 title="Änderungen speichern sich selbst">Legendeneditor</h2>
+                  <LegendTabs key={projectId} projectId={projectId} categories={data.category_colors} active={legendId}
+                    onSelect={(id) => setLegendSel({ project: projectId, id })} notify={notify} />
+                </header>
+                {legendId !== null && (
+                  <LegendEditor key={`${projectId}:${legendId}`} projectId={projectId} legendId={legendId || null}
+                    data={data} categories={categories} notify={notify} />
+                )}
+              </section>
             )}
 
             {tab === "changes" && (
@@ -758,12 +771,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
 
             {tab === "layers" && (
               <>
-                <p className="desc">
-                  Jede Kategorie behält ihre Legendenebene. Für die Farbe sucht das Programm in den Plänen zuerst
-                  denselben Ebenennamen, danach den Namensteil nach der BKP-Nummer (E_232.5_Licht passt zu E_Licht,
-                  E_233_Leuchten nicht). Bei mehreren Treffern zählt die Ebene mit den meisten Apparaten. Eine manuell
-                  gewählte Ebene gilt nur für dieses Projekt.
-                </p>
+                <Desc short="Jede Kategorie behält ihre Legendenebene." more="Für die Farbe sucht das Programm in den Plänen zuerst denselben Ebenennamen, danach den Namensteil nach der BKP-Nummer (E_232.5_Licht passt zu E_Licht, E_233_Leuchten nicht). Bei mehreren Treffern zählt die Ebene mit den meisten Apparaten. Eine manuell gewählte Ebene gilt nur für dieses Projekt." />
                 <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
                   <span className="hint">
                     {allCategories
@@ -1002,10 +1010,7 @@ function UnknownList({
   if (!items.length) return <div className="empty">Alle Elemente sind erkannt.</div>;
   return (
     <div className="unknown-list">
-      <p className="desc">
-        Wähle für jedes Element das passende Symbol. Die Entscheidung gilt für die ganze Firma und bei jedem weiteren
-        Import automatisch.
-      </p>
+      <Desc short="Wähle für jedes Element das passende Symbol." more="Die Entscheidung gilt für die ganze Firma und bei jedem weiteren Import automatisch." />
       {items.map((u) => (
         <UnknownCard key={u.source_key} projectId={projectId} plans={plans} item={u} notify={notify} onChanged={onChanged} />
       ))}
