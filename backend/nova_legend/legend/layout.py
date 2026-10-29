@@ -397,13 +397,19 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
                   if r.get("picture") == "symbol" and not r.get("heading")), default=0.0)
     room_w = max(side, text_x - 1.2, min(widest + 1.5, colw * 0.45))
     text_x = max(text_x, room_w + 1.2)
+    swatch_h = min(tile * 0.3, max(1.0, ts * 0.6))
     rows = []
     for r in general["rows"]:
         heading = bool(r.get("heading"))
         size = ts * max(0.5, min(3.0, float(r.get("text_scale") or 1.0)))
         width = colw - 1.6 if heading else colw - text_x - 0.8
         lines = wrap(r["text"], size, width, heading)
-        if cap and not heading:
+        if r.get("picture") == "swatch" and not heading:
+            # a colour code needs no symbol tile: the row is as high as its text
+            h = max(swatch_h + 1.2, len(lines[:cap] if cap else lines) * size * LINE_FACTOR + TEXT_CLEARANCE)
+            if cap:
+                lines = lines[:cap] or [""]
+        elif cap and not heading:
             lines = lines[:cap] or [""]
             h = slot
         else:
@@ -465,7 +471,7 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
                     # one chip per colour, the same size in every row, text beside it
                     shrink = factor if factor < 1 else 1.0
                     w = min(tile * 0.92, colw * 0.42) * shrink
-                    hgt = min(tile * 0.38, max(1.3, ts * 0.95)) * shrink
+                    hgt = swatch_h * shrink
                     prims.append({"t": "rect", "x": round(cx + axis - w / 2, 3), "y": round(mid - hgt / 2, 3),
                                   "w": round(w, 3), "h": round(hgt, 3), "fill": r.get("swatch") or "#9aa0a6",
                                   "stroke": None, "role": "swatch"})

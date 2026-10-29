@@ -10,4 +10,5 @@ Kurz, was sich für dich ändert. Der oberste Abschnitt erscheint im Update-Fens
 - Firmensymbole: Text, Abschnitt, Grösse und Drehung für alle Projekte speichern
 - Zwei Einträge kombinieren: «Decke / Wand»
 - Werkzeugleiste einstellbar (Ansicht ▾), Liste links kompakt
+- Farbcodes im Allgemeinteil kompakt: eine Textzeile pro Farbe
 - Symbole gleich gross, Farben aus dem Plan, Deckenauslass bei Licht

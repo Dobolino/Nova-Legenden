@@ -855,6 +855,39 @@ def test_clipping_cuts_a_fill_a_thick_stroke_and_drops_text_outside_the_window()
     assert texts == ["L3"]
 
 
+def test_short_colour_codes_are_chips_in_compact_rows(tmp_path):
+    """Farbcodes drawn as short filled bars (a block with one SOLID) are colour chips; their
+    rows are as high as the text, lower than a symbol row."""
+    from nova_legend.legend.general import load
+    from nova_legend.legend.layout import entry_slot, symbol_tile
+
+    d = ezdxf.new("R2013", units=4)
+    d.header["$INSUNITS"] = 4
+    blk = d.blocks.new("Bar")
+    blk.add_solid([(0, 0), (9, 0), (0, 1), (9, 1)])
+    msp = d.modelspace()
+    colours = [0xFF0000, 0x0099FF, 0x00FF00]
+    msp.add_circle((5, 4 * 4.55 + 2), 1.5)
+    msp.add_text("Dose", height=2.0).set_placement((25, 4 * 4.55 + 1.3))
+    for k, colour in enumerate(colours):
+        y = k * 4.55
+        msp.add_blockref("Bar", (1, y + 1.7), dxfattribs={"true_color": colour})
+        msp.add_text(f"Code {k}", height=2.0).set_placement((25, y + 1.3))
+    path = tmp_path / "allgemein.dxf"
+    d.saveas(path)
+    part = load(str(path), 180, None)
+    codes = [r for r in part.rows if r["text"].startswith("Code")]
+    assert [r.get("picture") for r in codes] == ["swatch"] * 3
+    assert {r["swatch"] for r in codes} == {"#ff0000", "#0099ff", "#00ff00"}
+    doc = normalize({"style": {"text_size": 2.5}, "blocks": []})
+    lay = layout(doc, {}, part.info())
+    chips = sorted((p for p in lay["prims"] if p.get("role") == "swatch"), key=lambda p: (p["x"], p["y"]))
+    pitch = chips[1]["y"] - chips[0]["y"]
+    assert chips[0]["x"] == chips[1]["x"]
+    assert pitch < entry_slot(doc["style"], symbol_tile(doc["style"])) - 0.5   # lower than a symbol row
+    assert all(c["h"] < pitch for c in chips)                 # a gap between the chips
+
+
 def test_a_colour_bar_becomes_a_chip_and_the_symbol_stays_whole(tmp_path):
     """Leaders and notes are left out. A colour bar is a chip. The symbol is not sliced."""
     from ezdxf import bbox as ezbbox

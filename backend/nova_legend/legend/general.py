@@ -378,6 +378,30 @@ def _is_hairline(box, to_mm: float) -> bool:
     return h <= 0.45 and w >= max(8.0, h * 6)
 
 
+def _is_color_code(entity, box, to_mm: float) -> bool:
+    """A short filled bar alone in its row (Farbcodes): a fill or a block of fills,
+    at least five times as long as high."""
+    w, h = _span_mm(box, to_mm)
+    if not (0.3 <= h <= 2.5 and w >= h * 5):
+        return False
+    if entity.dxftype() == "INSERT":
+        try:
+            inner = list(entity.doc.blocks[entity.dxf.name])
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(inner) and all(e.dxftype() in _FILL for e in inner)
+    return entity.dxftype() in _FILL
+
+
+def _code_paint(entity) -> str | None:
+    """Colour of a colour code: its own, or for a block the fill's, else the block's."""
+    if entity.dxftype() == "INSERT":
+        fill = next(iter(entity.doc.blocks[entity.dxf.name]), None)
+        own = fill is not None and (fill.dxf.hasattr("true_color") or 0 < int(fill.dxf.get("color", 256)) < 256)
+        return (_paint(fill) if own else None) or _paint(entity)
+    return _paint(entity)
+
+
 def _row_picture(ents, to_mm: float) -> dict | None:
     """What of this row is worth drawing.
 
@@ -399,6 +423,8 @@ def _row_picture(ents, to_mm: float) -> dict | None:
     if not core and bars:
         bars.sort(key=lambda eb: _span_mm(eb[1], to_mm)[0] * _span_mm(eb[1], to_mm)[1], reverse=True)
         return {"picture": "swatch", "swatch": _paint(bars[0][0]) or "#9aa0a6"}
+    if len(geom) == 1 and _is_color_code(*geom[0], to_mm):
+        return {"picture": "swatch", "swatch": _code_paint(geom[0][0])}
     if not core:
         return {"picture": "line", "keep": hair or geom}
     return {"picture": "symbol", "keep": core}
@@ -588,8 +614,8 @@ def split_rows(doc, to_mm: float, bands: list[float] | None = None) -> tuple[lis
             pic = _row_picture(r["ents"], to_mm)
             if pic and pic["picture"] == "swatch":
                 item["picture"] = "swatch"
-                item["swatch"] = pic["swatch"]
-                item["vb"], item["svg"] = _swatch_svg(pic["swatch"])
+                item["swatch"] = pic["swatch"] or (_row_colors(doc, [e for e, _b in r["ents"]]) or ["#9aa0a6"])[0]
+                item["vb"], item["svg"] = _swatch_svg(item["swatch"])
             elif pic and pic.get("keep"):
                 kept = pic["keep"]
                 x0 = min(b.extmin.x for _e, b in kept)
