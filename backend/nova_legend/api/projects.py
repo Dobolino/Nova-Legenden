@@ -129,6 +129,15 @@ def register(app: FastAPI, st) -> None:
         chosen = (p.settings().get("category_layers") or {})
         usage = getattr(ev, "layer_usage", {})
         used = category_usage(result["rows"])
+        # a section counts the apparatus of its groups
+        parents = {c["id"]: c.get("parent") for c in ev.categories}
+        for cid, n in list(used.items()):
+            seen = {cid}
+            up = parents.get(cid)
+            while up and up not in seen:
+                used[up] = used.get(up, 0) + n
+                seen.add(up)
+                up = parents.get(up)
         out = []
         for cat in ev.categories:
             picked = pick_category_layer(cat.get("layer") or "", layers, usage.get(cat["id"], {}),

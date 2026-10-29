@@ -144,6 +144,7 @@ function NewLegendDialog({ projectId, categories, current, notify, onClose, onDo
   const [name, setName] = useState("");
   const [source, setSource] = useState<Source>("categories");
   const [chosen, setChosen] = useState<string[]>([]);
+  const [general, setGeneral] = useState<boolean | null>(null);   // null: follows the choice
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   useDialogFocus(dialogRef, onClose, busy);
@@ -155,6 +156,12 @@ function NewLegendDialog({ projectId, categories, current, notify, onClose, onDo
   }
 
   const valid = name.trim() && (source !== "categories" || chosen.length > 0);
+  // sections with their groups; only what the project uses
+  const used = categories.filter((c) => (c.used ?? 0) > 0 || !("used" in c));
+  const sections = used.filter((c) => !c.parent || !used.some((p) => p.id === c.parent));
+  const groupsOf = (id: string) => used.filter((c) => c.parent === id);
+  // the full legend shows the general part, a themed one (chosen categories) not
+  const withGeneral = general ?? source !== "categories";
 
   async function submit() {
     if (!valid) return;
@@ -165,6 +172,7 @@ function NewLegendDialog({ projectId, categories, current, notify, onClose, onDo
         source: source === "categories" ? "proposal" : source,
         categories: source === "categories" ? chosen : undefined,
         copy_of: source === "copy" ? current?.id ?? null : null,
+        general: source === "copy" ? undefined : withGeneral,
       });
       notify(`Legende «${r.legend.name}» angelegt`);
       onDone(r.items, r.legend.id!);
@@ -190,13 +198,28 @@ function NewLegendDialog({ projectId, categories, current, notify, onClose, onDo
         </label>
         {source === "categories" && (
           <div className="legend-cat-pick">
-            {categories.map((c) => (
-              <label key={c.id} className="toggle">
-                <input type="checkbox" checked={chosen.includes(c.id)} onChange={() => toggle(c.id)} />
-                <span className="swatch" style={{ background: c.color }} /> {c.title}
-              </label>
+            {sections.map((c) => (
+              <div key={c.id} className="legend-cat-section">
+                <label className="toggle">
+                  <input type="checkbox" checked={chosen.includes(c.id)} onChange={() => toggle(c.id)} />
+                  <span className="swatch" style={{ background: c.color }} /> <b>{c.title}</b>
+                  {c.used ? <span className="hint"> {c.used}</span> : null}
+                </label>
+                {groupsOf(c.id).length > 1 && (
+                  <div className="legend-cat-groups">
+                    {groupsOf(c.id).map((g) => (
+                      <label key={g.id} className="toggle" title={`Nur ${g.title}: eigener Abschnitt «${g.title}»`}>
+                        <input type="checkbox" checked={chosen.includes(g.id) || chosen.includes(c.id)}
+                          disabled={chosen.includes(c.id)} onChange={() => toggle(g.id)} />
+                        {g.title} {g.used ? <span className="hint">{g.used}</span> : null}
+                      </label>
+                    ))}
+                  </div>
+                )}
+              </div>
             ))}
-            {!categories.length && <p className="desc">Das Projekt hat noch keine Kategorien mit Apparaten.</p>}
+            {!sections.length && <p className="desc">Das Projekt hat noch keine Kategorien mit Apparaten.</p>}
+            <p className="hint">Ein Abschnitt nimmt alle seine Gruppen. Eine einzelne Gruppe, z. B. «UKV», wird ein eigener Abschnitt.</p>
           </div>
         )}
         <label className="toggle choice">
@@ -211,6 +234,12 @@ function NewLegendDialog({ projectId, categories, current, notify, onClose, onDo
           <input type="radio" checked={source === "empty"} onChange={() => setSource("empty")} />
           Leer
         </label>
+        {source !== "copy" && (
+          <label className="toggle" style={{ marginTop: 10 }}>
+            <input type="checkbox" checked={withGeneral} onChange={(e) => setGeneral(e.target.checked)} />
+            Mit Allgemeinteil
+          </label>
+        )}
         <div className="row" style={{ justifyContent: "flex-end", marginTop: 16 }}>
           <button className="btn" onClick={onClose}>Abbrechen</button>
           <button className="btn primary" disabled={busy || !valid} onClick={submit}>Anlegen</button>

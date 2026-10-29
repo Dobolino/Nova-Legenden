@@ -617,7 +617,7 @@ export const api = {
   saveLegend: (id: string, doc: LegendDoc, signal?: AbortSignal, legendId?: number | null) =>
     request<{ legend: StoredLegend }>("PUT", `/api/projects/${encodeURIComponent(id)}/legend${legendId ? `?legend=${legendId}` : ""}`, { doc }, signal),
   legends: (id: string) => request<{ items: LegendListItem[] }>("GET", `/api/projects/${encodeURIComponent(id)}/legends`),
-  newLegend: (id: string, body: { name: string; source: "proposal" | "empty" | "copy"; categories?: string[]; copy_of?: number | null }) =>
+  newLegend: (id: string, body: { name: string; source: "proposal" | "empty" | "copy"; categories?: string[]; copy_of?: number | null; general?: boolean }) =>
     request<{ legend: StoredLegend; items: LegendListItem[] }>("POST", `/api/projects/${encodeURIComponent(id)}/legends`, body),
   renameLegend: (id: string, legendId: number, name: string) =>
     request<{ items: LegendListItem[] }>("PUT", `/api/projects/${encodeURIComponent(id)}/legends/${legendId}`, { name }),

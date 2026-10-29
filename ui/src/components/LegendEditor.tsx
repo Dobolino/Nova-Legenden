@@ -131,7 +131,7 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<FamilyItem[]>([]);
   const [exportBlock, setExportBlock] = useState("");
-  const [exportGeneral, setExportGeneral] = useState(true);
+
   const [showGrid, setShowGrid] = useState(readGridPref);
   const [panes, setPanes] = useState(readPanes);
 
@@ -193,7 +193,20 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
   const colorByCat = useMemo(() => Object.fromEntries(data.category_colors.map((c) => [c.id, c.color])), [data.category_colors]);
   const layerByCat = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c.layer ?? ""])), [categories]);
   const catTitle = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c.title])), [categories]);
+  const catParent = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c.parent ?? null])), [categories]);
+  /** A group and its sections up to the top: an entry of «UKV» goes to «UKV» if the legend
+   *  has that section, else to «Kommunikation». */
+  const lineage = useCallback((id: string): string[] => {
+    const out = [id];
+    while (catParent[out[out.length - 1]] && !out.includes(catParent[out[out.length - 1]]!)) out.push(catParent[out[out.length - 1]]!);
+    return out;
+  }, [catParent]);
   const descriptions = info?.descriptions ?? {};
+  // the general part belongs to the legend: a themed legend (only UKV) goes without it
+  const exportGeneral = doc?.general_on !== false;
+  const setExportGeneral = (on: boolean) => {
+    if (doc) change({ ...doc, general_on: on });
+  };
   const stencilNames = info?.stencil_names ?? {};
   const companySymbols = info?.company_symbols ?? {};
   /** Size, turn and mirror a company symbol brings along when it is added. */
@@ -408,9 +421,10 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
   }
 
   function ensureBlock(d: LegendDoc, categoriesOfEntry: string[], fallback: string | null): { doc: LegendDoc; id: string } {
-    const found = blockForCategory(d, categoriesOfEntry, null);
+    const found = blockForCategory(d, categoriesOfEntry.flatMap(lineage), null);
     if (found) return { doc: d, id: found };
-    const cat = categoriesOfEntry.find((c) => catTitle[c]);
+    // a new section is the top category of the group
+    const cat = categoriesOfEntry.map((c) => lineage(c)[lineage(c).length - 1]).find((c) => catTitle[c]);
     if (cat) return addBlock(d, catTitle[cat], cat, colorByCat[cat], layerByCat[cat] ?? "");
     if (fallback && d.blocks.some((b) => b.id === fallback)) return { doc: d, id: fallback };
     if (d.blocks[0]) return { doc: d, id: d.blocks[0].id };
@@ -735,7 +749,12 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
 
   if (!info) return <div className="hint">lädt …</div>;
 
-  const generalBox = general?.kind ? (
+  const generalBox = general?.kind && doc?.general_on === false ? (
+    <p className="info-line">
+      Diese Legende ist ohne Allgemeinteil. Einschalten: «Allgemeinteil zeigen» bei den Legenden-Einstellungen.{" "}
+      <button className="btn small" onClick={() => setExportGeneral(true)}>Allgemeinteil zeigen</button>
+    </p>
+  ) : general?.kind ? (
     <p className="info-line">
       Allgemeinteil: {general.kind === "dxf" ? "DXF/DWG" : "Vorlagen-Projekt"} vom Server, gesperrt.
       {general.rows?.length
@@ -2423,9 +2442,9 @@ function DocProps({
               setExportGeneral(e.target.checked);
             }}
           />
-          Allgemeinteil einschliessen
+          Allgemeinteil zeigen
         </label>
-        <InfoTip text="Verknüpfte DXF- oder DWG-Datei unter dem Titel. Hat sie eine Textspalte, nutzt sie Schriftgrösse, Symbolgrösse, Abstand und Spalten dieser Legende. Die Zeichnung bleibt gesperrt. N4D wird nicht gelesen." />
+        <InfoTip text="Gilt für diese Legende: Vorschau, DXF, DWG und PDF. Aus z. B. für eine Legende nur mit UKV. Verknüpfte DXF- oder DWG-Datei unter dem Titel. Hat sie eine Textspalte, nutzt sie Schriftgrösse, Symbolgrösse, Abstand und Spalten dieser Legende. Die Zeichnung bleibt gesperrt. N4D wird nicht gelesen." />
       </div>
       <label className="field">
         <span>Liniendicke im PDF <InfoTip text="Original: jede Linie so dick wie in der Zeichnung. Proportional: ein verkleinertes Symbol bekommt dünnere Linien, ein vergrössertes dickere (0,09 bis 0,5 mm). DXF und DWG behalten die Original-Liniendicke." /></span>

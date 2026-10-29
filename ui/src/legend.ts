@@ -106,6 +106,7 @@ export interface LegendDoc {
   style: LegendStyle;
   title: { text: string; scale: number; size_mm: number; font: string; color: string; border_on: boolean; border: string };
   general_section?: GeneralSection;
+  general_on?: boolean; // false: shown and exported without the general part (themed legend)
   blocks: LegendBlock[];
 }
 

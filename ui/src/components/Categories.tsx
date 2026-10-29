@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, Category, Options } from "../api";
+import { api, Category, FamilyItem, Options } from "../api";
 import { CategoryDraft, draftOf, draftPatch, isDirty } from "../uiState";
 
 interface Props {
@@ -399,6 +399,8 @@ export default function Categories({ categories, options, notify, onChanged }: P
           </div>
         </div>
 
+        <UnassignedCard categories={categories} notify={notify} onChanged={onChanged} />
+
         <div className="card">
           <h3>Regeln für Symbolfamilien und Legende</h3>
           <p className="desc">{COMPANY}</p>
@@ -459,6 +461,84 @@ export default function Categories({ categories, options, notify, onChanged }: P
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Symbol families no rule places (they would land in «Diverse»): an admin sorts them once,
+ *  the choice applies in every project. */
+function UnassignedCard({ categories, notify, onChanged }: {
+  categories: Category[];
+  notify: (text: string, error?: boolean) => void;
+  onChanged: () => void;
+}) {
+  const [items, setItems] = useState<FamilyItem[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    try {
+      const r = await api.families({ q: "", category: "", dataset: "", mounting: "", all_variants: false });
+      setItems(r.items.filter((f) => f.category_source === "keine Regel"));
+    } catch (e) {
+      notify((e as Error).message, true);
+    }
+  }
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const byId = Object.fromEntries(categories.map((c) => [c.id, c]));
+  const options = categories.filter((c) => c.id !== "diverse");
+
+  async function assign(f: FamilyItem, cat: string) {
+    if (!cat) return;
+    setBusy(true);
+    try {
+      await api.assign(f.id, [cat]);
+      setItems((list) => (list ?? []).filter((x) => x.id !== f.id));
+      notify(`«${f.title}» gehört jetzt zu «${byId[cat]?.title ?? cat}» (gilt für die ganze Firma)`);
+      onChanged();
+    } catch (e) {
+      notify((e as Error).message, true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="card">
+      <h3>Nicht zugeordnet {items ? <span className="badge">{items.length}</span> : null}</h3>
+      <p className="desc">
+        Symbole, die kein Nummernkreis und keine Namensregel einordnet. In der Legende landen sie in «Diverse».
+        Ordne sie einmal einem Abschnitt oder einer Gruppe zu, dann gilt das in allen Projekten.
+      </p>
+      {items && !items.length && <p className="hint">Alle Symbole sind zugeordnet.</p>}
+      {items && items.length > 0 && (
+        <div className="table-scroll" style={{ maxHeight: 360 }}>
+          <table className="list-table">
+            <thead><tr><th>Symbol</th><th>Katalog</th><th>Zuordnen</th></tr></thead>
+            <tbody>
+              {items.map((f) => (
+                <tr key={f.id}>
+                  <td className="wrap"><b>{f.title}</b></td>
+                  <td className="hint">{f.representative.sheet} · {f.representative.item}</td>
+                  <td>
+                    <select className="select" disabled={busy} value="" aria-label={`${f.title} zuordnen`}
+                      onChange={(e) => assign(f, e.target.value)}>
+                      <option value="">wählen…</option>
+                      {options.map((c) => (
+                        <option key={c.id} value={c.id}>{c.parent ? `${byId[c.parent]?.title ?? ""} › ` : ""}{c.title}</option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
