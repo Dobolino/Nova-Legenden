@@ -82,6 +82,33 @@ type DropTarget = { block: string; before: string | null; cell?: number };
 /** Id of the entry a drop preview shows for a new symbol from the lists. */
 const DROP_ID = "__drop__";
 
+const BAR_KEY = "nl.legend.toolbar";
+/** What the toolbar of the legend editor can show; each computer chooses (Ansicht ▾). */
+const TOOLBAR_ITEMS = [
+  { id: "history", label: "Neuer Vorschlag, Rückgängig" },
+  { id: "insert", label: "Einfügen" },
+  { id: "grid", label: "Raster" },
+  { id: "rows", label: "Zeile und Text (mm)" },
+  { id: "columns", label: "Spalten" },
+  { id: "sizes", label: "Schrift, Symbole, gleiche Fläche" },
+  { id: "general", label: "Allgemeinteil ein/aus" },
+  { id: "zoom", label: "Zoom" },
+  { id: "gridlines", label: "Raster anzeigen" },
+  { id: "export", label: "DXF herunterladen" },
+] as const;
+const TOOLBAR_DEFAULT = ["history", "insert", "grid", "columns", "general", "zoom", "gridlines", "export"];
+
+function readBarPref(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(BAR_KEY);
+    const list = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(list)) return new Set(list.filter((x) => typeof x === "string"));
+  } catch {
+    /* default */
+  }
+  return new Set(TOOLBAR_DEFAULT);
+}
+
 function readGridPref(): boolean {
   try {
     // on, until this computer switches it off
@@ -174,6 +201,21 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
   }
   const [detached, setDetached] = useState(false);
   const [windowed, setWindowed] = useState(false);
+  const [bar, setBar] = useState<Set<string>>(readBarPref);
+  const saveBar = (next: Set<string>) => {
+    setBar(next);
+    try {
+      window.localStorage.setItem(BAR_KEY, JSON.stringify([...next]));
+    } catch {
+      /* only a convenience */
+    }
+  };
+  const toggleBar = (id: string) => {
+    const next = new Set(bar);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    saveBar(next);
+  };
   const [dropAt, setDropAt] = useState<DropTarget | null>(null);
   // while dragging onto a cell: the legend as it would look after the drop (others make room)
   const [preview, setPreview] = useState<{ layout: LegendLayout; id: string } | null>(null);
@@ -745,6 +787,24 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  function fitWidth() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const padding = getComputedStyle(canvas);
+    const width = canvas.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
+    setZoom(Math.max(0.5, Math.min(12, round(width / W))));
+  }
+
+  function toggleGrid() {
+    const next = !showGrid;
+    setShowGrid(next);
+    try {
+      window.localStorage.setItem(GRID_KEY, next ? "1" : "0");
+    } catch {
+      /* only a convenience */
+    }
+  }
+
   // -- render ------------------------------------------------------------------------------
 
   if (!info) return <div className="hint">lädt …</div>;
@@ -754,15 +814,13 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
       Diese Legende ist ohne Allgemeinteil. Einschalten: «Allgemeinteil zeigen» bei den Legenden-Einstellungen.{" "}
       <button className="btn small" onClick={() => setExportGeneral(true)}>Allgemeinteil zeigen</button>
     </p>
-  ) : general?.kind ? (
-    <p className="info-line">
-      Allgemeinteil: {general.kind === "dxf" ? "DXF/DWG" : "Vorlagen-Projekt"} vom Server, gesperrt.
-      {general.rows?.length
-        ? " Schrift, Symbolgrösse, Abstand und Spalten sind dieselben wie in dieser Legende. Der Titel steht darüber."
-        : " Die Vorlage hat keine Textspalte und bleibt eine Zeichnung. Der Titel steht darüber."}
-    </p>
   ) : general?.error ? (
-    <p className="info-line company">Allgemeinteil: {general.error}</p>
+    <p className="info-line company">
+      Allgemeinteil: {general.error} Erwartet wird eine DXF oder DWG, z. B. «E_Legende.dxf», oder ein Ordner, in dem sie liegt.{" "}
+      <button className="btn small" onClick={() => window.dispatchEvent(new CustomEvent("nl:open-settings"))}>
+        Servervorlage in den Einstellungen wählen
+      </button>
+    </p>
   ) : null;
 
   if (!doc) {
@@ -802,145 +860,207 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
       <button type="button" className="legend-window-back" aria-label="Grossansicht beenden" title="Grossansicht beenden" onClick={() => setWindowed(false)} />
     )}
     <div className={`legend-editor ${windowed ? "windowed" : ""}`}>
-      <div className="legend-head">
-        <div className="legend-head-info">{generalBox}</div>
-        <div className="legend-head-actions">
-        <button className={`btn small ${detached ? "is-on" : ""}`} aria-pressed={detached} onClick={() => setDetached((v) => !v)}
-          title={detached ? "Die Einstellungen wieder rechts neben der Legende zeigen" : "Die Einstellungen als schwebendes Feld über der Legende zeigen. Mehr Platz für das Blatt."}>
-          {detached ? "⇥ Einstellungen andocken" : "⧉ Einstellungen schwebend"}
-        </button>
-        {windowed ? (
-          <button className="btn small primary" onClick={() => setWindowed(false)} title="Grossansicht schliessen. Esc geht auch.">
-            ✕ Grossansicht beenden
-          </button>
-        ) : (
-          <button className="btn small" onClick={() => setWindowed(true)}
-            title="Den Editor über das ganze Programmfenster öffnen. Esc oder «Grossansicht beenden» schliesst sie.">
-            ⤢ Grossansicht
-          </button>
-        )}
+      {(generalBox || windowed) && (
+        <div className="legend-head">
+          <div className="legend-head-info">{generalBox}</div>
+          {windowed && (
+            <div className="legend-head-actions">
+              <button className="btn small primary" onClick={() => setWindowed(false)} title="Grossansicht schliessen. Esc geht auch.">
+                ✕ Grossansicht beenden
+              </button>
+            </div>
+          )}
         </div>
-      </div>
+      )}
       <div className="legend-toolbar">
-        <div className="tool-group" role="group" aria-label="Verlauf">
-        <button className="btn small" disabled={busy} onClick={proposal} title="Legende aus den aktuellen Projektzahlen neu vorschlagen">
-          Neuer Vorschlag
-        </button>
-        <button className="btn small" disabled={!hist?.past.length} onClick={() => setHist((h) => (h ? undo(h) : h))} title="Rückgängig (Strg+Z)">
-          ↶ Rückgängig
-        </button>
-        <button className="btn small" disabled={!hist?.future.length} onClick={() => setHist((h) => (h ? redo(h) : h))} title="Wiederholen (Strg+Y)">
-          ↷ Wiederholen
-        </button>
-        </div>
-        <div className="tool-group" role="group" aria-label="Aufbau">
-        <Menu label="Einfügen">
-          <button className="btn small" onClick={() => addKind("text")} title={FREE_TEXT_HINT}>
-            + Freier Text
-          </button>
-          <button className="btn small" onClick={() => addKind("line")} title="Linienmuster, z. B. für Leitungen und Trassen">
-            + Linie
-          </button>
-          <button className="btn small" onClick={() => addKind("note")}>
-            + Hinweis
-          </button>
-          <button
-            className="btn small"
-            onClick={() => {
+        {bar.has("history") && (
+          <div className="tool-group" role="group" aria-label="Verlauf">
+            <button className="btn small" disabled={busy} onClick={proposal} title="Legende aus den aktuellen Projektzahlen neu vorschlagen">
+              Neuer Vorschlag
+            </button>
+            <button className="btn small icon-btn" disabled={!hist?.past.length} onClick={() => setHist((h) => (h ? undo(h) : h))}
+              title="Rückgängig (Strg+Z)" aria-label="Rückgängig">↶</button>
+            <button className="btn small icon-btn" disabled={!hist?.future.length} onClick={() => setHist((h) => (h ? redo(h) : h))}
+              title="Wiederholen (Strg+Y)" aria-label="Wiederholen">↷</button>
+          </div>
+        )}
+        {bar.has("insert") && (
+          <Menu label="Einfügen">
+            <button className="btn small" onClick={() => addKind("text")} title={FREE_TEXT_HINT}>+ Freier Text</button>
+            <button className="btn small" onClick={() => addKind("line")} title="Linienmuster, z. B. für Leitungen und Trassen">+ Linie</button>
+            <button className="btn small" onClick={() => addKind("note")}>+ Hinweis</button>
+            <button className="btn small" onClick={() => {
               const r = addBlock(doc, "Neuer Abschnitt");
               change(r.doc);
               setSel({ type: "block", block: r.id });
-            }}
-          >
-            + Abschnitt
+            }}>+ Abschnitt</button>
+          </Menu>
+        )}
+        {(bar.has("grid") || bar.has("rows") || bar.has("columns")) && (
+          <div className="tool-group" role="group" aria-label="Raster">
+          {bar.has("grid") && (<label className="filter-label">
+            Raster
+            <select
+              className="select"
+              value={style.grid}
+              onChange={(e) => {
+                if (e.target.value === "custom") {
+                  setStyle({ grid: "custom" });
+                  return;
+                }
+                // row and text step change at once, so the grid lines follow without a reload
+                const g = info.grids.find((x) => x.id === e.target.value);
+                if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
+              }}
+              aria-label="Rastermass"
+              title="Standard behält das Kachelmass aus der Schriftgrösse. Die anderen Stufen setzen Zeilenhöhe und Textabstand. Benutzerdefiniert übernimmt die beiden Millimeterfelder."
+            >
+              {info.grids.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.id === "standard"
+                    ? "Standard (aus Schrift)"
+                    : `${g.label} ${String(g.row).replace(".", ",")} / ${String(g.text_offset).replace(".", ",")} mm`}
+                </option>
+              ))}
+              <option value="custom">Eigenes Mass</option>
+            </select>
+          </label>)}
+            {bar.has("rows") && (
+              <>
+                <label className="filter-label">
+                  Zeile
+                  <span className="grid-mm">
+                    <NumberInput label="Zeilenhöhe in mm" value={style.row} step={0.5} min={3} max={30}
+                      onCommit={(v) => setStyle({ grid: "custom", row: Math.round(v * 100) / 100 })} />
+                  </span>
+                </label>
+                <label className="filter-label">
+                  Text
+                  <span className="grid-mm">
+                    <NumberInput label="Textabstand in mm" value={style.text_offset} step={0.5} min={5} max={45}
+                      onCommit={(v) => setStyle({ grid: "custom", text_offset: Math.round(v * 100) / 100 })} />
+                  </span>
+                </label>
+              </>
+            )}
+            {bar.has("columns") && (
+              <label className="filter-label">
+                Spalten
+                <select className="select" value={style.columns} onChange={(e) => setStyle({ columns: Number(e.target.value) })}>
+                  <option value={2}>2</option>
+                  <option value={3}>3</option>
+                </select>
+              </label>
+            )}
+          </div>
+        )}
+        {bar.has("sizes") && (
+          <div className="tool-group" role="group" aria-label="Grössen">
+            <label className="filter-label">
+              Schrift
+              <span className="grid-mm">
+                <NumberInput label="Schriftgrösse in mm" value={style.text_size} step={0.25} min={1} max={10}
+                  onCommit={(v) => setStyle({ text_size: Math.max(1, Math.min(10, v)) })} />
+              </span>
+            </label>
+            <label className="filter-label">
+              Symbole
+              <span className="grid-mm">
+                <NumberInput label="Symbolmassstab" value={style.symbol_scale} step={0.1} min={0.2} max={5}
+                  onCommit={(v) => setStyle({ symbol_scale: Math.max(0.2, Math.min(5, v)) })} />
+              </span>
+            </label>
+            {(style.symbol_size ?? "tile") === "tile" && (
+              <label className="toggle" title="Jedes Symbol bekommt dieselbe Fläche, höchstens 75 % der Kachel">
+                <input type="checkbox" checked={style.normalize_size !== false} onChange={(e) => setStyle({ normalize_size: e.target.checked })} />
+                Gleiche Fläche
+              </label>
+            )}
+          </div>
+        )}
+        {bar.has("general") && general?.kind && (
+          <label className="toggle tool-toggle" title={`Allgemeinteil in dieser Legende zeigen (Vorschau und Export). ${general.kind === "dxf" ? "DXF/DWG" : "Vorlagen-Projekt"} vom Server, gesperrt. Schrift, Symbolgrösse, Abstand und Spalten übernimmt er von dieser Legende.`}>
+            <input type="checkbox" checked={exportGeneral} onChange={(e) => setExportGeneral(e.target.checked)} />
+            Allgemeinteil
+          </label>
+        )}
+        {bar.has("zoom") && (
+          <div className="tool-group" role="group" aria-label="Zoom">
+            <button className="btn small" onClick={() => setZoom((z) => Math.max(0.5, round(z / 1.25)))} aria-label="Verkleinern" title="Verkleinern">−</button>
+            <span className="hint zoom-value">{Math.round((zoom / 4) * 100)} %</span>
+            <button className="btn small" onClick={() => setZoom((z) => Math.min(12, round(z * 1.25)))} aria-label="Vergrössern" title="Vergrössern">+</button>
+            <button className="btn small" onClick={fitWidth} title="Die Ansicht an die verfügbare Breite anpassen. Ändert nur den Zoom.">An Breite</button>
+          </div>
+        )}
+        {bar.has("gridlines") && (
+          <button className={`btn small ${showGrid ? "is-on" : ""}`} aria-pressed={showGrid} onClick={toggleGrid} aria-label="Raster anzeigen"
+            title="Rasterlinien im gewählten Mass einblenden. Sie erscheinen nicht im Export.">
+            ▦ Raster
           </button>
-        </Menu>
-        <label className="filter-label">
-          Raster
-          <select
-            className="select"
-            value={style.grid}
-            onChange={(e) => {
-              if (e.target.value === "custom") {
-                setStyle({ grid: "custom" });
-                return;
-              }
-              // row and text step change at once, so the grid lines follow without a reload
-              const g = info.grids.find((x) => x.id === e.target.value);
-              if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
-            }}
-            aria-label="Rastermass"
-            title="Standard behält das Kachelmass aus der Schriftgrösse. Die anderen Stufen setzen Zeilenhöhe und Textabstand. Benutzerdefiniert übernimmt die beiden Millimeterfelder."
-          >
-            {info.grids.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.id === "standard"
-                  ? "★ Standard · Kachel aus der Schrift"
-                  : `${g.label} · Zeile ${String(g.row).replace(".", ",")} mm · Text ${String(g.text_offset).replace(".", ",")} mm`}
-              </option>
+        )}
+        <Menu label="Ansicht">
+          <div className="menu-fields">
+            <label className="filter-label">
+              Raster
+              <select
+                className="select"
+                value={style.grid}
+                onChange={(e) => {
+                  if (e.target.value === "custom") {
+                    setStyle({ grid: "custom" });
+                    return;
+                  }
+                  // row and text step change at once, so the grid lines follow without a reload
+                  const g = info.grids.find((x) => x.id === e.target.value);
+                  if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
+                }}
+                aria-label="Rastermass"
+                title="Standard behält das Kachelmass aus der Schriftgrösse. Die anderen Stufen setzen Zeilenhöhe und Textabstand. Benutzerdefiniert übernimmt die beiden Millimeterfelder."
+              >
+                {info.grids.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.id === "standard"
+                      ? "★ Standard · Kachel aus der Schrift"
+                      : `${g.label} · Zeile ${String(g.row).replace(".", ",")} mm · Text ${String(g.text_offset).replace(".", ",")} mm`}
+                  </option>
+                ))}
+                <option value="custom">Benutzerdefiniert</option>
+              </select>
+            </label>
+          </div>
+          {!bar.has("gridlines") && (
+            <button className={`btn small ${showGrid ? "is-on" : ""}`} aria-pressed={showGrid} onClick={toggleGrid}>Raster anzeigen</button>
+          )}
+          <button className={`btn small ${detached ? "is-on" : ""}`} aria-pressed={detached} onClick={() => setDetached((v) => !v)}>
+            {detached ? "Einstellungen andocken" : "Einstellungen schwebend"}
+          </button>
+          {!windowed && <button className="btn small" onClick={() => setWindowed(true)} title="Den Editor über das ganze Programmfenster öffnen. Esc schliesst ihn.">Als Fenster</button>}
+          <div className="menu-divider" />
+          <div className="menu-fields bar-choice" role="group" aria-label="Sichtbar in der Leiste">
+            <span className="hint">In der Leiste zeigen:</span>
+            {TOOLBAR_ITEMS.map((t) => (
+              <label key={t.id} className="toggle">
+                <input type="checkbox" checked={bar.has(t.id)} onChange={() => toggleBar(t.id)} />
+                {t.label}
+              </label>
             ))}
-            <option value="custom">Benutzerdefiniert</option>
-          </select>
-        </label>
-        <label className="filter-label">
-          Zeile
-          <span className="grid-mm">
-            <NumberInput label="Zeilenhöhe in mm" value={style.row} step={0.5} min={3} max={30}
-              onCommit={(v) => setStyle({ grid: "custom", row: Math.round(v * 100) / 100 })} />
-          </span>
-        </label>
-        <label className="filter-label">
-          Text
-          <span className="grid-mm">
-            <NumberInput label="Textabstand in mm" value={style.text_offset} step={0.5} min={5} max={45}
-              onCommit={(v) => setStyle({ grid: "custom", text_offset: Math.round(v * 100) / 100 })} />
-          </span>
-        </label>
-        <label className="filter-label">
-          Spalten
-          <select className="select" value={style.columns} onChange={(e) => setStyle({ columns: Number(e.target.value) })}>
-            <option value={2}>2</option>
-            <option value={3}>3</option>
-          </select>
-        </label>
-        </div>
-        <div className="tool-group" role="group" aria-label="Zoom">
-        <button className="btn small" onClick={() => setZoom((z) => Math.max(0.5, round(z / 1.25)))} aria-label="Verkleinern" title="Verkleinern">
-          −
-        </button>
-        <span className="hint zoom-value">{Math.round((zoom / 4) * 100)} %</span>
-        <button className="btn small" onClick={() => setZoom((z) => Math.min(12, round(z * 1.25)))} aria-label="Vergrössern" title="Vergrössern">
-          +
-        </button>
-        <button className="btn small" onClick={() => {
-          const canvas = canvasRef.current;
-          if (!canvas) return;
-          const padding = getComputedStyle(canvas);
-          const width = canvas.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
-          setZoom(Math.max(0.5, Math.min(12, round(width / W))));
-        }} title="Die Ansicht an die verfügbare Breite anpassen. Ändert nur den Zoom.">An Breite anpassen</button>
-        </div>
-        <div className="legend-status">
-          <button
-            className={`btn small ${showGrid ? "is-on" : ""}`}
-            aria-pressed={showGrid}
-            onClick={() => {
-              const next = !showGrid;
-              setShowGrid(next);
-              try {
-                window.localStorage.setItem(GRID_KEY, next ? "1" : "0");
-              } catch {
-                /* only a convenience */
-              }
-            }}
-            title="Rasterlinien im gewählten Mass einblenden. Sie erscheinen nicht im Export."
-          >
-            ▦ Raster anzeigen
+            <button className="btn small" onClick={() => saveBar(new Set(TOOLBAR_DEFAULT))}>Standard</button>
+          </div>
+        </Menu>
+        {windowed && <button className="btn small" onClick={() => setWindowed(false)}>Fenster schliessen</button>}
+
+        <span style={{ flex: 1 }} />
+        <span className={saveState === "error" ? "dirty" : saveState === "saving" ? "hint" : "saved"} role="status"
+          title={savedInfo ? `Zuletzt gespeichert ${savedInfo}` : undefined}>
+          {saveState === "saving" ? "Speichert …" : saveState === "error" ? "Nicht gespeichert" : savedInfo ? "Gespeichert" : ""}
+        </span>
+        {bar.has("export") && (
+          <button className="btn small primary" disabled={busy || exporting}
+            onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}
+            title={exportBlock ? "Den gewählten Abschnitt als DXF herunterladen" : "Die ganze Legende als DXF herunterladen"}>
+            <Icon name="download" size={16} /> {exporting ? "Exportiert …" : "DXF herunterladen"}
           </button>
-          <span className={saveState === "error" ? "dirty" : saveState === "saving" ? "hint" : "saved"} role="status">
-            {saveState === "saving" ? "Speichert …" : saveState === "error" ? "Nicht gespeichert" : savedInfo ? `Gespeichert ${savedInfo}` : ""}
-          </span>
-        </div>
+        )}
       </div>
       {windowed && (
         <div className="legend-window-bar">
@@ -1210,10 +1330,12 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
               ? `Gespeichert ${savedInfo}`
               : "Wird auch automatisch gespeichert."}
         </p>
-        <button className="btn small primary" disabled={busy || exporting} onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}
-          title={exportBlock ? "Den in den Exportoptionen gewählten Abschnitt als DXF herunterladen" : "Die ganze Legende als DXF herunterladen"}>
-          <Icon name="download" size={16} /> {exporting ? "Exportiert …" : "DXF herunterladen"}
-        </button>
+        {!bar.has("export") && (
+          <button className="btn small primary" disabled={busy || exporting} onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}
+            title={exportBlock ? "Den in den Exportoptionen gewählten Abschnitt als DXF herunterladen" : "Die ganze Legende als DXF herunterladen"}>
+            <Icon name="download" size={16} /> {exporting ? "Exportiert …" : "DXF herunterladen"}
+          </button>
+        )}
         </div>
           {sel?.type === "general" ? (
             <GeneralProps doc={doc} general={general} company={info.company} change={change} />

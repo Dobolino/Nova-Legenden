@@ -1025,3 +1025,20 @@ img.sym-icon { object-fit: contain; }
 
 .legend-cat-section { margin: 4px 0; }
 .legend-cat-groups { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 2px 0 6px 26px; font-size: 12.5px; }
+
+/* compact editor head: title and the legend choice in one row */
+.legend-workspace { gap: 8px; padding: 10px 12px 12px; }
+.legend-workspace-head { flex-wrap: wrap; }
+.legend-workspace-head .le-badge { width: 28px; height: 28px; font-size: 15px; border-radius: 8px; }
+.legend-workspace-head h2 { font-size: 16px; white-space: nowrap; }
+.legend-workspace-head .legend-tabs { flex: 1; min-width: 0; margin: 0; }
+.legend-toolbar { gap: 6px; padding: 6px 8px; }
+.legend-toolbar .tool-group { gap: 4px; }
+.legend-toolbar .tool-toggle { font-size: 12px; white-space: nowrap; }
+.bar-choice { display: flex; flex-direction: column; gap: 4px; padding-top: 4px; }
+.bar-choice .toggle { font-size: 12.5px; }
+.legend-toolbar .toggle { font-size: 12px; white-space: nowrap; }
+.legend-toolbar .icon-btn { min-width: 32px; padding-left: 8px; padding-right: 8px; font-size: 15px; }
+.legend-toolbar .tool-group .select { max-width: 160px; }
+.legend-workspace { gap: 6px; padding-top: 8px; }
+.legend-workspace-head .btn, .legend-workspace-head .select { min-height: 30px; }

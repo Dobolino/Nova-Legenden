@@ -574,7 +574,8 @@ def test_editor_space_and_view_options_do_not_change_the_exported_document(edito
     page.locator(".project-page").evaluate("node => { node.scrollTop = 0; }")
     assert not page.locator("details.fold").evaluate("node => node.open")
     canvas = page.locator(".legend-canvas").bounding_box()
-    assert canvas["y"] < 500
+    # the sheet starts on the first screen, under the project head and a two-row toolbar
+    assert canvas["y"] < 600
     assert min(canvas["height"], 960 - canvas["y"]) >= 400
     before = client.get(f"/api/projects/{a}/legend").json()["legend"]["doc"]
     page.locator("summary").filter(has_text="Ansicht").click()

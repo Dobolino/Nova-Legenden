@@ -143,6 +143,13 @@ function AppContent() {
     }
   };
 
+  // the legend editor asks for the settings (e.g. to choose the general part)
+  useEffect(() => {
+    const open = () => navigate(() => setTab("settings"));
+    window.addEventListener("nl:open-settings", open);
+    return () => window.removeEventListener("nl:open-settings", open);
+  }, [navigate]);
+
   return (
     <div className="app" inert={pending}>
       <aside className="app-nav" aria-label="Programmnavigation">
