@@ -8,6 +8,7 @@ import ProjectsPage from "./components/ProjectsPage";
 import { applyTheme, effectiveDark, loadTheme, ThemeMode } from "./theme";
 import { NavigationProvider, useNavigation } from "./Navigation";
 import { Icon } from "./components/Icons";
+import Menu from "./components/Menu";
 import edecoLogo from "./assets/edeco-logo.svg?raw";
 import Minesweeper from "./components/Minesweeper";
 import UpdateDialog, { type UpdatePhase } from "./components/UpdateDialog";
@@ -129,6 +130,7 @@ function AppContent() {
   }
 
   const noDatasets = status && status.datasets.length === 0;
+  const dataWarning = noDatasets || Boolean(status && (status.company_error || !status.settings.company_folder));
   const current = NAVIGATION.find((item) => item.id === tab)!;
   const [mineOpen, setMineOpen] = useState(false);
   const secretClicks = useRef<number[]>([]);
@@ -195,17 +197,19 @@ function AppContent() {
           <span className="powered topbar-powered">Powered by Trimble Nova</span>
           {status && (
             <div className="top-chips">
-              <span className={`chip ${noDatasets ? "warn" : ""}`} title="Geladene Nova-Symbol-Datensätze (z. B. V1 2022, V2 2025)">
-                <span className={`dot ${noDatasets ? "warn" : ""}`} />
-                {status.datasets.length} Datensätze<span className="chip-detail"> · {status.symbol_count.toLocaleString("de-CH")} Symbole</span>
-              </span>
-              <span className={`chip ${status.company_error ? "warn" : ""}`} title={`Firmenweite Daten: ${status.company_db}`}>
-                <span className={`dot ${status.company_error || !status.settings.company_folder ? "warn" : ""}`} />
-                {status.settings.company_folder ? "Firmenordner" : "Firmenordner fehlt"}
-              </span>
-              <span className="chip" title="Standard für neue Projekte. Jedes Projekt speichert seine eigene Nova-Version.">
-                Nova-Version {status.settings.nova_version}
-              </span>
+              <div className={`data-status ${dataWarning ? "warn" : ""}`}>
+                <Menu label={noDatasets ? "Datensätze fehlen" : dataWarning ? "Firmenordner prüfen" : "Datenstatus"}>
+                  <dl className="status-details">
+                    <dt>Symbolbibliothek</dt>
+                    <dd>{status.datasets.length} Datensätze · {status.symbol_count.toLocaleString("de-CH")} Symbole</dd>
+                    <dt>Firmenordner</dt>
+                    <dd className={status.company_error ? "warn-text" : ""}>{status.company_error || status.settings.company_folder || "Nicht eingerichtet"}</dd>
+                    <dt>Nova-Version für neue Projekte</dt>
+                    <dd>{status.settings.nova_version}</dd>
+                  </dl>
+                  <button className="btn small" onClick={() => navigate(() => setTab("settings"))}>Einstellungen öffnen</button>
+                </Menu>
+              </div>
               <button
                 className="chip theme-btn"
                 onClick={() => setTheme(effectiveDark(theme) ? "light" : "dark")}
@@ -213,7 +217,6 @@ function AppContent() {
                 aria-label={effectiveDark(theme) ? "Heller Modus" : "Dunkler Modus"}
               >
                 <Icon name={effectiveDark(theme) ? "sun" : "moon"} size={16} />
-                <span>{effectiveDark(theme) ? "Hell" : "Dunkel"}</span>
               </button>
               {update?.available && (
                 <button
@@ -229,8 +232,8 @@ function AppContent() {
           )}
         </header>
         <div className="main">
-          {tab === "projects" && (
-            <ProjectsPage categories={categories} notify={notify} onOpenSettings={() => navigate(() => setTab("settings"))} />
+          {tab === "projects" && status && (
+            <ProjectsPage categories={categories} novaVersion={status.settings.nova_version} notify={notify} onOpenSettings={() => navigate(() => setTab("settings"))} />
           )}
           {tab === "library" && options && (
             <Library

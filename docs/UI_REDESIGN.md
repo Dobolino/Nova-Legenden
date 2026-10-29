@@ -8,6 +8,19 @@ Das Designsystem betrifft Navigation, Formulare, Tabellen, Dialoge und die Bedie
 
 ## Orientierung und Abläufe
 
+### Kompakte Ansicht und Fehlerkorrekturen (29.10.2026)
+
+- Projektzahlen stehen als kurze Zeile unter der Überschrift. Der Datenstatus in der Kopfleiste fasst Bibliothek, Firmenordner und Nova-Voreinstellung zusammen; fehlende Datensätze und Probleme mit dem Firmenordner bleiben am Auslöser sichtbar.
+- Der Projektkopf ist kompakter. ZIP-Export, Fehleranalyse und weitere Projektaktionen liegen im Menü **Projektaktionen**. **Gesamtliste**, **Legende** und **Prüfung** bleiben direkt sichtbar; Importvergleiche, unbekannte Elemente, Ebenen und nicht berücksichtigte Elemente stehen unter **Weitere Bereiche**. Der aktuell gewählte zusätzliche Bereich erscheint am Menüauslöser.
+- Beim Öffnen der Legende ist die Planübersicht eingeklappt. Sie lässt sich im Editor wieder öffnen, ohne den gemerkten Zustand der übrigen Projektansicht zu verändern. Die Werkzeugleiste zeigt Verlauf, Einfügen, Zoom und DXF-Export; Raster, Spalten und Fensteroptionen liegen unter **Ansicht**. Im vergrösserten Fenster bleibt **Fenster schliessen** direkt erreichbar. Menüs werden über der Arbeitsfläche angezeigt und an den Fensterrändern ausgerichtet.
+- Ungespeicherte Kategorieänderungen werden beim Arbeitsbereichs- und Kategoriewechsel mit **Speichern**, **Verwerfen** oder **Abbrechen** geschützt. Bei ungültigen Eingaben oder Speicherfehlern bleiben Dialog und Entwurf erhalten. Beim Schliessen der Anwendung wird vor ungespeicherten Kategorien gewarnt.
+- Bibliothekssuchen brechen ältere Anfragen ab und übernehmen deren spätere Ergebnisse oder Fehlermeldungen nicht mehr. Neue Projekte verwenden die unter Einstellungen gewählte Nova-Version; eine manuelle Auswahl im Dialog bleibt möglich.
+- Pillow ist als allgemeine Backendabhängigkeit deklariert, da die DXF-SVG-Vorschau es auch ausserhalb des Windows-Pakets benötigt.
+
+Browserregressionen prüfen die drei Fehler einschliesslich Abbruch, Verwerfen, Speicherfehlern und erneutem Versuch, die nutzbare Editorfläche sowie Ansichtseinstellungen und einen echten DXF-Download. Die vorhandenen Tests für Speichern und Projektwechsel bleiben erhalten.
+
+Validierter Stand dieser Überarbeitung: 23 Frontendtests, TypeScript-/Vite-Build und 184 Backendtests einschliesslich 19 Browserfällen bestanden. 13 weitere Tests benötigen hier nicht vorhandene Original-/Beispieldateien und wurden übersprungen. Zusätzlich wurden die Ansicht bei 320, 390, 768, 1440 und 1560 Pixeln, Hell-/Dunkelmodus und die Erreichbarkeit der zusätzlichen Bereiche geprüft. Windows-Installer und ODA-DWG-Konvertierung waren nicht Teil dieser Prüfung.
+
 | Bereich | Anpassung | Erreichbarkeit |
 |---|---|---|
 | Hauptnavigation | Feste Navigation mit Logo und vier Arbeitsbereichen | Projekte, Bibliothek, Kategorien und Einstellungen bleiben jederzeit erreichbar; auf kleinen Fenstern als kompakte Leiste |

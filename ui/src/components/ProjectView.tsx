@@ -48,6 +48,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
   const [dropHot, setDropHot] = useState(false);
   const [importStatus, setImportStatus] = useState<ImportStatus | null>(null);
   const [open, setOpen] = useState(true);
+  const [editorPlansOpen, setEditorPlansOpen] = useState(false);
   const [allCategories, setAllCategories] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
   const [reviewLoading, setReviewLoading] = useState(false);
@@ -90,6 +91,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
 
   useEffect(() => {
     setImportStatus(null);
+    setEditorPlansOpen(false);
     load();
     return () => { loadGeneration.current += 1; };
   }, [load]);
@@ -119,6 +121,10 @@ export default function ProjectView({ projectId, projects, categories, notify, o
   }
 
   function toggleOpen(next: boolean) {
+    if (tab === "legend") {
+      setEditorPlansOpen(next);
+      return;
+    }
     setOpen(next);
     rememberPlansOpen(projectId, next);
   }
@@ -145,6 +151,16 @@ export default function ProjectView({ projectId, projects, categories, notify, o
   }
 
   const plans = data.plans;
+  const plansExpanded = plans.length === 0 || (tab === "legend" ? editorPlansOpen : open);
+  const secondaryLabels: Partial<Record<Tab, string>> = {
+    changes: "Änderungen", unknown: "Unbekannt", layers: "Ebenen und Farben", ignored: "Nicht berücksichtigt",
+  };
+  function openTab(next: Tab) {
+    navigate(() => {
+      if (next === "legend") setEditorPlansOpen(false);
+      setTab(next);
+    });
+  }
   const planTotals = Object.fromEntries(plans.map((p) => [p.id, data.rows.reduce((n, r) => n + (r.counts[p.id] ?? 0), 0)]));
   const changeCount = plans.reduce(
     (n, p) => n + (p.change_summary ? p.change_summary.neu + p.change_summary.weg + p.change_summary.geaendert : 0),
@@ -192,7 +208,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
   }
 
   return (
-    <div className="page project-page">
+    <div className={`page project-page ${tab === "legend" ? "is-editing" : ""}`}>
       <div className="page-inner full">
         <div className="card project-head">
           <div className="project-breadcrumb">
@@ -222,7 +238,6 @@ export default function ProjectView({ projectId, projects, categories, notify, o
           </div>
           <div className="project-heading-line">
             <div>
-              <div className="eyebrow">Projekt</div>
               <h2 className="project-title">
                 {data.meta.project_number && <span className="number">{data.meta.project_number}</span>}
                 {data.meta.name}
@@ -230,21 +245,6 @@ export default function ProjectView({ projectId, projects, categories, notify, o
               <div className="hint">{plans.length} {plans.length === 1 ? "Geschoss" : "Geschosse"} · {data.rows.length} Symbolarten</div>
             </div>
             <div className="project-actions">
-              <a
-                className="btn small"
-                href={api.exportUrl(projectId)}
-                download={data.export_name}
-                onClick={(e) => {
-                  e.preventDefault();
-                  navigate(() => downloadProject());
-                }}
-                title={`Speichert ${data.export_name}: Projektdatei projekt.nlproj und eine Plandatei pro Geschoss.`}
-              >
-                Projekt exportieren
-              </a>
-              <button className="btn small" disabled={busy} onClick={() => navigate(() => setTab("review"))} title="Offene Punkte vor der Weitergabe">
-                Fehleranalyse
-              </button>
             <Menu label="Projektaktionen" disabled={busy}>
               <button
                 className="btn small"
@@ -272,6 +272,9 @@ export default function ProjectView({ projectId, projects, categories, notify, o
               >
                 Projekt als ZIP exportieren
               </a>
+              <button className="btn small" disabled={busy} onClick={() => openTab("review")}>
+                Fehleranalyse
+              </button>
               <button
                 className="btn small"
                 disabled={busy}
@@ -356,10 +359,10 @@ export default function ProjectView({ projectId, projects, categories, notify, o
 
         <details
           className={`card fold ${dropHot ? "drop-hot" : ""}`}
-          open={open || plans.length === 0}
+          open={plansExpanded}
           onToggle={(e) => {
             const next = (e.currentTarget as HTMLDetailsElement).open;
-            if (next !== (open || plans.length === 0)) toggleOpen(next);
+            if (next !== plansExpanded) toggleOpen(next);
           }}
           onDragOver={(e) => {
             if (![...e.dataTransfer.types].includes("Files")) return;
@@ -376,7 +379,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
         >
           <summary onClick={(e) => plans.length === 0 && e.preventDefault()}>
             Pläne · {plans.length === 1 ? "1 Geschoss" : `${plans.length} Geschosse`}
-            {!open && plans.length > 0 && <span className="hint">Dateien hierher ziehen importiert Geschosse (mehrere möglich)</span>}
+            {!plansExpanded && tab !== "legend" && <span className="hint">Dateien hierher ziehen importiert Geschosse (mehrere möglich)</span>}
             {importStatus?.kind === "busy" && <span className="hint">· importiert …</span>}
           </summary>
           <p className="desc">
@@ -582,57 +585,61 @@ export default function ProjectView({ projectId, projects, categories, notify, o
             <div className="subtabs" role="tablist">
               <button
                 className={`tab ${tab === "list" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("list"))}
+                onClick={() => openTab("list")}
                 title={`${data.rows.length} Zeilen: eine Zeile pro Apparat (Symbolfamilie) über alle Geschosse`}
               >
                 Gesamtliste ({data.rows.length})
               </button>
               <button
                 className={`tab ${tab === "legend" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("legend"))}
+                onClick={() => openTab("legend")}
                 title="Legenden-Editor: Symbole anordnen, Texte bearbeiten, Abschnitte nach Kategorien"
               >
                 Legende
               </button>
               <button
-                className={`tab ${tab === "changes" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("changes"))}
-                title="Vergleich von Importversionen. Die Zahl zählt geänderte Zeilen zum vorigen Import, über alle Geschosse."
-              >
-                Änderungen{changeCount ? ` (${changeCount})` : ""}
-              </button>
-              <button
-                className={`tab ${tab === "unknown" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("unknown"))}
-                title={`${data.unknown.length} Elementarten ohne sichere Erkennung`}
-              >
-                Unbekannt ({data.unknown.length})
-              </button>
-              <button
-                className={`tab ${tab === "layers" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("layers"))}
-                title={`${toChoose} verwendete Kategorien ohne passende Ebene · ${data.layers.length} Ebenen aus den importierten Plänen`}
-              >
-                Ebenen und Farben{toChoose ? ` · ${toChoose} Ebene wählen` : ""}
-              </button>
-              <button
-                className={`tab ${tab === "ignored" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("ignored"))}
-                title={`${data.ignored.length} Elementarten, die nicht als Apparat zählen (Leitungen, Masse, Beschriftungen, von Hand ignoriert)`}
-              >
-                Nicht berücksichtigt ({data.ignored.length})
-              </button>
-              <button
                 className={`tab ${tab === "review" ? "active" : ""}`}
-                onClick={() => navigate(() => setTab("review"))}
+                onClick={() => openTab("review")}
                 title="Was vor der Weitergabe der Legende offen ist"
               >
                 Prüfung
                 {review && review.blocks > 0 && <span className="tab-dot">{review.blocks}</span>}
                 {review?.ready && <span className="ok-text"> ✓</span>}
               </button>
+              <div className={`secondary-tabs ${secondaryLabels[tab] ? "active" : ""}`}>
+              <Menu label={secondaryLabels[tab] ?? "Weitere Bereiche"}>
+              <button
+                className="btn small"
+                onClick={() => openTab("changes")}
+                title="Vergleich von Importversionen. Die Zahl zählt geänderte Zeilen zum vorigen Import, über alle Geschosse."
+              >
+                Änderungen{changeCount ? ` (${changeCount})` : ""}
+              </button>
+              <button
+                className="btn small"
+                onClick={() => openTab("unknown")}
+                title={`${data.unknown.length} Elementarten ohne sichere Erkennung`}
+              >
+                Unbekannt ({data.unknown.length})
+              </button>
+              <button
+                className="btn small"
+                onClick={() => openTab("layers")}
+                title={`${toChoose} verwendete Kategorien ohne passende Ebene · ${data.layers.length} Ebenen aus den importierten Plänen`}
+              >
+                Ebenen und Farben{toChoose ? ` · ${toChoose} Ebene wählen` : ""}
+              </button>
+              <button
+                className="btn small"
+                onClick={() => openTab("ignored")}
+                title={`${data.ignored.length} Elementarten, die nicht als Apparat zählen (Leitungen, Masse, Beschriftungen, von Hand ignoriert)`}
+              >
+                Nicht berücksichtigt ({data.ignored.length})
+              </button>
+              </Menu>
+              </div>
               {tab !== "legend" && (
-                <button className="btn primary tabs-end" onClick={() => navigate(() => setTab("legend"))} title="Legenden-Editor öffnen">
+                <button className="btn primary tabs-end" onClick={() => openTab("legend")} title="Legenden-Editor öffnen">
                   Legende bearbeiten
                 </button>
               )}
@@ -887,7 +894,7 @@ export default function ProjectView({ projectId, projects, categories, notify, o
                 loading={reviewLoading}
                 fileName={`${data.export_name.replace(/\.zip$/i, "")}-pruefung.txt`}
                 onRefresh={loadReview}
-                onOpen={(target) => navigate(() => setTab(target))}
+                onOpen={openTab}
               />
             )}
 

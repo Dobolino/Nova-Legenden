@@ -65,20 +65,25 @@ export default function Library(props: Props) {
   const countOf = (cat: Category) => (counts ? (counts[cat.id] ?? 0) : (cat.family_count ?? 0));
 
   useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
     const handle = window.setTimeout(async () => {
-      setLoading(true);
       try {
-        const res = await api.families({ q, category, dataset, mounting, all_variants: allVariants });
+        const res = await api.families({ q, category, dataset, mounting, all_variants: allVariants }, controller.signal);
+        if (controller.signal.aborted) return;
         setItems(res.items);
         setTotal(res.total);
         setShown(PAGE);
       } catch (e) {
-        notify((e as Error).message, true);
+        if (!controller.signal.aborted) notify((e as Error).message, true);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     }, 180);
-    return () => window.clearTimeout(handle);
+    return () => {
+      window.clearTimeout(handle);
+      controller.abort();
+    };
   }, [q, category, dataset, mounting, allVariants, revision, options, refresh, notify]);
 
   // Load more tiles when the sentinel scrolls into view
@@ -180,7 +185,7 @@ export default function Library(props: Props) {
           Symbolgrösse
           <input type="range" min={96} max={160} value={icon} aria-valuemin={96} aria-valuemax={160} aria-valuenow={icon} onChange={(e) => setIcon(Number(e.target.value))} />
         </label>
-        <span className="result-count">{loading ? "lädt …" : `${total} Einträge`}</span>
+        <span className="result-count">{loading ? "lädt …" : `${total} ${total === 1 ? "Eintrag" : "Einträge"}`}</span>
       </div>
       <div className="lib-body">
         <aside className="sidebar">

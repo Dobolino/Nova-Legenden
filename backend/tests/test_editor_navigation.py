@@ -445,3 +445,168 @@ def test_the_admin_list_is_visible_and_locks_after_the_first_name(env, monkeypat
         server.should_exit = True
         thread.join(timeout=10)
         sock.close()
+
+
+def edit_category(page):
+    page.get_by_role("button", name="Kategorien", exact=True).click()
+    page.locator(".cat-table tbody tr").first.click()
+    field = page.get_by_label("Titel", exact=True)
+    original = field.input_value()
+    field.fill("Kategorie mit Änderungen")
+    return field, original
+
+
+@pytest.mark.parametrize("destination", ["workspace", "category"])
+def test_category_navigation_can_cancel_or_discard_a_draft(editor, destination):
+    page, _, client, _ = editor
+    field, original = edit_category(page)
+
+    def leave():
+        if destination == "workspace":
+            page.get_by_role("button", name="Projekte", exact=True).click()
+        else:
+            page.locator(".cat-table tbody tr").nth(1).click()
+
+    assert page.evaluate("!window.dispatchEvent(new Event('beforeunload', { cancelable: true }))")
+    leave()
+    dialog = page.get_by_role("alertdialog", name="Änderungen speichern?")
+    playwright.expect(dialog).to_be_visible()
+    dialog.get_by_role("button", name="Abbrechen", exact=True).click()
+    playwright.expect(field).to_have_value("Kategorie mit Änderungen")
+    leave()
+    dialog.get_by_role("button", name="Verwerfen", exact=True).click()
+    playwright.expect(dialog).not_to_be_visible()
+    if destination == "workspace":
+        page.get_by_role("button", name="Kategorien", exact=True).click()
+    page.locator(".cat-table tbody tr").first.click()
+    playwright.expect(page.get_by_label("Titel", exact=True)).to_have_value(original)
+    assert not page.evaluate("!window.dispatchEvent(new Event('beforeunload', { cancelable: true }))")
+    assert client.get("/api/categories").json()["items"][0]["title"] == original
+
+
+def test_category_navigation_saves_before_leaving_and_retries_a_failed_save(editor):
+    page, _, client, _ = editor
+    _, original = edit_category(page)
+
+    def fail_save(route):
+        if route.request.method == "PUT":
+            route.fulfill(status=503, json={"detail": "Firmenordner nicht erreichbar"})
+        else:
+            route.continue_()
+
+    page.route("**/api/categories/*", fail_save)
+    page.get_by_role("button", name="Projekte", exact=True).click()
+    dialog = page.get_by_role("alertdialog", name="Änderungen speichern?")
+    dialog.get_by_role("button", name="Speichern", exact=True).click()
+    playwright.expect(dialog.get_by_role("alert")).to_contain_text("nicht gespeichert")
+    assert client.get("/api/categories").json()["items"][0]["title"] == original
+    page.unroute("**/api/categories/*", fail_save)
+    dialog.get_by_role("button", name="Speichern", exact=True).click()
+    playwright.expect(dialog).not_to_be_visible()
+    playwright.expect(page.get_by_role("button", name="Projekte", exact=True)).to_have_class("tab active")
+    assert client.get("/api/categories").json()["items"][0]["title"] == "Kategorie mit Änderungen"
+    assert not page.evaluate("!window.dispatchEvent(new Event('beforeunload', { cancelable: true }))")
+
+
+def test_invalid_category_cannot_be_saved_by_navigation(editor):
+    page, _, client, _ = editor
+    _, original = edit_category(page)
+    page.get_by_label("Spalten in der Legende", exact=True).fill("0")
+    page.get_by_role("button", name="Projekte", exact=True).click()
+    dialog = page.get_by_role("alertdialog", name="Änderungen speichern?")
+    dialog.get_by_role("button", name="Speichern", exact=True).click()
+    playwright.expect(dialog.get_by_role("alert")).to_be_visible()
+    dialog.get_by_role("button", name="Abbrechen", exact=True).click()
+    playwright.expect(page.get_by_label("Titel", exact=True)).to_have_value("Kategorie mit Änderungen")
+    assert client.get("/api/categories").json()["items"][0]["title"] == original
+
+
+@pytest.mark.parametrize("old_response", ["success", "error"])
+def test_library_ignores_an_outdated_search_response(editor, old_response):
+    page, _, _, _ = editor
+    page.get_by_role("button", name="Bibliothek", exact=True).click()
+    playwright.expect(page.locator(".tile").first).to_be_visible()
+    page.evaluate("""(oldResponse) => {
+        const original = window.fetch;
+        window.fetch = async (...args) => {
+            const response = await original(...args);
+            const url = new URL(String(args[0]), location.href);
+            if (url.pathname === '/api/library/families' && url.searchParams.get('q') === 'Schalter') {
+                window.oldSearchWaiting = true;
+                await new Promise(resolve => { window.releaseOldSearch = resolve; });
+                if (oldResponse === 'error') throw new Error('Outdated search failed');
+            }
+            return response;
+        };
+    }""", old_response)
+    search = page.get_by_role("textbox", name="Symbole suchen")
+    search.fill("Schalter")
+    page.wait_for_function("window.oldSearchWaiting === true")
+    search.fill("Brandmelder")
+    playwright.expect(page.locator(".tile .name")).to_have_text(["Brandmelder"])
+    page.evaluate("async () => { window.releaseOldSearch(); await new Promise(resolve => setTimeout(resolve, 100)); }")
+    playwright.expect(search).to_have_value("Brandmelder")
+    playwright.expect(page.locator(".tile .name")).to_have_text(["Brandmelder"])
+    playwright.expect(page.locator(".toast.error")).not_to_be_visible()
+    playwright.expect(page.locator(".result-count")).to_have_text("1 Eintrag")
+
+
+@pytest.mark.parametrize("override", [None, "19.2"])
+def test_new_project_uses_the_configured_nova_version_and_allows_an_override(editor, override):
+    page, _, client, _ = editor
+    assert client.put("/api/settings", json={"nova_version": "20"}).status_code == 200
+    page.reload()
+    page.get_by_role("button", name="Legende erstellen", exact=True).click()
+    page.get_by_role("radio", name="Neues Projekt", exact=True).check()
+    version = page.get_by_label("Nova-Version", exact=True)
+    playwright.expect(version).to_have_value("20")
+    if override:
+        version.select_option(override)
+    page.get_by_label("Bezeichnung", exact=True).fill("Nova version test")
+    page.get_by_role("button", name="Projekt anlegen", exact=True).click()
+    playwright.expect(page.get_by_role("heading", name="Nova version test", exact=True)).to_be_visible()
+    assert client.get("/api/projects/Nova%20version%20test").json()["meta"]["nova_version"] == (override or "20")
+
+
+def test_editor_space_and_view_options_do_not_change_the_exported_document(editor):
+    page, _, client, (a, _) = editor
+    page.set_viewport_size({"width": 1440, "height": 960})
+    page.locator(".project-page").evaluate("node => { node.scrollTop = 0; }")
+    assert not page.locator("details.fold").evaluate("node => node.open")
+    canvas = page.locator(".legend-canvas").bounding_box()
+    assert canvas["y"] < 500
+    assert min(canvas["height"], 960 - canvas["y"]) >= 400
+    before = client.get(f"/api/projects/{a}/legend").json()["legend"]["doc"]
+    page.locator("summary").filter(has_text="Ansicht").click()
+    playwright.expect(page.get_by_role("group", name="Ansicht", exact=True).get_by_role("combobox", name="Rastermass")).to_be_focused()
+    page.get_by_role("button", name="Raster anzeigen", exact=True).click()
+    page.get_by_role("button", name="Dunkler Modus", exact=True).click()
+    assert page.locator(".legend-paper > rect").first.evaluate("node => getComputedStyle(node).fill") == "rgb(255, 255, 255)"
+    page.locator("summary").filter(has_text="Ansicht").click()
+    page.get_by_role("button", name="Als Fenster", exact=True).click()
+    playwright.expect(page.locator(".legend-editor.windowed")).to_be_visible()
+    page.locator("summary").filter(has_text="Ansicht").click()
+    view_menu = page.get_by_role("group", name="Ansicht", exact=True)
+    playwright.expect(view_menu.get_by_role("combobox", name="Rastermass")).to_be_visible()
+    menu_box = view_menu.bounding_box()
+    assert menu_box["y"] >= 0 and menu_box["y"] + menu_box["height"] <= 960
+    page.keyboard.press("Escape")
+    playwright.expect(view_menu).not_to_be_visible()
+    playwright.expect(page.locator("summary").filter(has_text="Ansicht")).to_be_focused()
+    playwright.expect(page.locator(".legend-editor.windowed")).to_be_visible()
+    page.get_by_role("button", name="Fenster schliessen", exact=True).click()
+    playwright.expect(page.locator(".legend-editor.windowed")).not_to_be_visible()
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.locator("summary").filter(has_text="Ansicht").click()
+    playwright.expect(view_menu).to_be_visible()
+    menu_box = view_menu.bounding_box()
+    assert menu_box["x"] >= 0 and menu_box["x"] + menu_box["width"] <= 390
+    page.keyboard.press("Shift+Tab")
+    playwright.expect(view_menu).not_to_be_visible()
+    playwright.expect(page.locator("summary").filter(has_text="Ansicht")).to_be_focused()
+    page.set_viewport_size({"width": 1440, "height": 960})
+    with page.expect_download() as downloaded:
+        page.get_by_role("button", name="DXF herunterladen", exact=True).click()
+    import ezdxf
+    assert len(ezdxf.readfile(downloaded.value.path()).modelspace()) > 0
+    assert client.get(f"/api/projects/{a}/legend").json()["legend"]["doc"] == before

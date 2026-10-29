@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, Category, FamilyItem, Options } from "../api";
 import { CategoryDraft, draftOf, draftPatch, isDirty } from "../uiState";
+import { useNavigation, useUnsavedDraft } from "../Navigation";
 
 interface Props {
   categories: Category[];
   options: Options;
   notify: (text: string, error?: boolean) => void;
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
 }
 
 const OPTION_TEXT: { key: keyof Options; title: string; desc: string }[] = [
@@ -35,6 +36,7 @@ const OPTION_TEXT: { key: keyof Options; title: string; desc: string }[] = [
 const COMPANY = "Diese Einstellungen gelten für die ganze Firma.";
 
 export default function Categories({ categories, options, notify, onChanged }: Props) {
+  const { navigate } = useNavigation();
   const [selected, setSelected] = useState<string | null>(null);
   const [draft, setDraft] = useState<CategoryDraft | null>(null);
   const [saved, setSaved] = useState("");
@@ -50,6 +52,7 @@ export default function Categories({ categories, options, notify, onChanged }: P
   const tops = categories.filter((c) => !c.parent);
   const current = selected ? byId[selected] : undefined;
   const dirty = isDirty(draft, current);
+  useUnsavedDraft({ label: `Kategorie «${current?.title ?? ""}»`, dirty, save });
 
   // After a reload: keep a draft with changes, otherwise show the stored values
   useEffect(() => {
@@ -69,7 +72,7 @@ export default function Categories({ categories, options, notify, onChanged }: P
     try {
       await action();
       notify(`${ok} (gilt für die ganze Firma)`);
-      onChanged();
+      await onChanged();
       return true;
     } catch (e) {
       notify((e as Error).message, true);
@@ -81,22 +84,24 @@ export default function Categories({ categories, options, notify, onChanged }: P
 
   function select(id: string) {
     if (id === selected) return;
-    if (dirty && !window.confirm(`Ungespeicherte Änderungen an «${current?.title}» verwerfen?`)) return;
-    setSelected(id);
-    setDraft(draftOf(byId[id]));
-    setSaved("");
+    navigate(() => {
+      setSelected(id);
+      setDraft(draftOf(byId[id]));
+      setSaved("");
+    });
   }
 
-  async function save() {
-    if (!current || !draft) return;
+  async function save(): Promise<boolean> {
+    if (!current || !draft) return true;
     const { patch, error } = draftPatch(draft, current);
     if (error) {
       notify(error, true);
-      return;
+      return false;
     }
-    if (!Object.keys(patch).length) return;
+    if (!Object.keys(patch).length) return true;
     const ok = await run(() => api.updateCategory(current.id, patch), "Gespeichert");
     if (ok) setSaved(`Gespeichert ${new Date().toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" })}`);
+    return ok;
   }
 
   function drop(targetId: string) {
