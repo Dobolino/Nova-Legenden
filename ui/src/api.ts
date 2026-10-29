@@ -492,8 +492,8 @@ export const api = {
   updateInstall: () => request<{ ok: boolean; message: string }>("POST", "/api/update/install"),
   options: () => request<Options>("GET", "/api/options"),
   saveOptions: (o: Partial<Options>) => request<Options>("PUT", "/api/options", o),
-  families: (p: { q: string; category: string; dataset: string; mounting: string; all_variants: boolean }) =>
-    request<{ total: number; items: FamilyItem[] }>("GET", `/api/library/families?${qs(p)}`),
+  families: (p: { q: string; category: string; dataset: string; mounting: string; all_variants: boolean }, signal?: AbortSignal) =>
+    request<{ total: number; items: FamilyItem[] }>("GET", `/api/library/families?${qs(p)}`, undefined, signal),
   family: (id: string) => request<FamilyItem>("GET", `/api/library/family?${qs({ id })}`),
   symbol: (key: string, fill = true) => request<SymbolDetail>("GET", `/api/library/symbol?${qs({ key, fill })}`),
   setFill: (id: string, show_fill: boolean | null) =>

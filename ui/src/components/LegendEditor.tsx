@@ -549,15 +549,12 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
   return (
     <>
     {windowed && (
-      <button type="button" className="legend-window-back" aria-label="Fenster schliessen" onClick={() => setWindowed(false)} />
+      <button type="button" className="legend-window-back" aria-label="Editorfenster über den Hintergrund schliessen" tabIndex={-1} onClick={() => setWindowed(false)} />
     )}
     <div className={`legend-editor ${windowed ? "windowed" : ""}`}>
       {generalBox}
       <div className="legend-toolbar">
         <div className="tool-group" role="group" aria-label="Verlauf">
-        <button className="btn small" disabled={busy} onClick={proposal} title="Legende aus den aktuellen Projektzahlen neu vorschlagen">
-          Neuer Vorschlag
-        </button>
         <button className="btn small" disabled={!hist?.past.length} onClick={() => setHist((h) => (h ? undo(h) : h))} title="Rückgängig (Strg+Z)">
           ↶ Rückgängig
         </button>
@@ -587,6 +584,9 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
             + Abschnitt
           </button>
         </Menu>
+        </div>
+        <Menu label="Ansicht">
+        <div className="menu-fields">
         <label className="filter-label">
           Raster
           <select
@@ -615,7 +615,6 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
           </select>
         </label>
         </div>
-        <div className="tool-group" role="group" aria-label="Ansicht">
         <button
           className={`btn small ${showGrid ? "is-on" : ""}`}
           aria-pressed={showGrid}
@@ -632,6 +631,21 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
         >
           Raster anzeigen
         </button>
+        <button className={`btn small ${detached ? "is-on" : ""}`} aria-pressed={detached} onClick={() => setDetached((v) => !v)}
+          title="Die Einstellungen als schwebendes Fenster über der Legende öffnen. Das Blatt bleibt weiss.">
+          {detached ? "Einstellungen andocken" : "Einstellungen lösen"}
+        </button>
+        {!windowed && <button className="btn small" onClick={() => setWindowed(true)}
+          title="Die Legende gross über dem Programm öffnen. Das Blatt bleibt weiss.">
+          Als Fenster
+        </button>}
+        <div className="menu-divider" />
+        <button className="btn small" disabled={busy} onClick={proposal} title="Legende aus den aktuellen Projektzahlen neu vorschlagen">
+          Neuer Vorschlag
+        </button>
+        </Menu>
+        {windowed && <button className="btn small" onClick={() => setWindowed(false)}>Fenster schliessen</button>}
+        <div className="tool-group" role="group" aria-label="Zoom">
         <button className="btn small" onClick={() => setZoom((z) => Math.max(0.5, round(z / 1.25)))} aria-label="Verkleinern">
           −
         </button>
@@ -648,18 +662,10 @@ export default function LegendEditor({ projectId, data, categories, notify }: Pr
           const width = canvas.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight);
           setZoom(Math.max(0.5, Math.min(12, round(width / W))));
         }} title="Die Ansicht an die verfügbare Breite anpassen. Ändert nur den Zoom.">An Breite anpassen</button>
-        <button className={`btn small ${detached ? "is-on" : ""}`} onClick={() => setDetached((v) => !v)}
-          title="Die Einstellungen als schwebendes Fenster über der Legende öffnen. Das Blatt bleibt weiss.">
-          {detached ? "Einstellungen andocken" : "Einstellungen lösen"}
-        </button>
-        <button className={`btn small ${windowed ? "is-on" : ""}`} onClick={() => setWindowed((v) => !v)}
-          title="Die Legende gross über dem Programm öffnen. Das Blatt bleibt weiss.">
-          {windowed ? "Fenster schliessen" : "Als Fenster"}
-        </button>
         </div>
         <span style={{ flex: 1 }} />
-        <span className={saveState === "error" ? "dirty" : saveState === "saving" ? "hint" : "saved"} role="status">
-          {saveState === "saving" ? "Speichert …" : saveState === "error" ? "Nicht gespeichert" : savedInfo ? `Gespeichert ${savedInfo}` : ""}
+        <span className={saveState === "error" ? "dirty" : saveState === "saving" ? "hint" : "saved"} role="status" title={savedInfo ? `Zuletzt gespeichert ${savedInfo}` : undefined}>
+          {saveState === "saving" ? "Speichert …" : saveState === "error" ? "Nicht gespeichert" : savedInfo ? "Gespeichert" : ""}
         </span>
         <div className="tool-group" role="group" aria-label="Export">
         <button className="btn small primary" disabled={busy || exporting} onClick={() => exportFile("dxf", exportBlock, exportGeneral && Boolean(general?.kind))}

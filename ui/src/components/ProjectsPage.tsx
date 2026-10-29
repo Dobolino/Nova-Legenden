@@ -7,11 +7,12 @@ import { useDialogFocus } from "../useDialogFocus";
 
 interface Props {
   categories: Category[];
+  novaVersion: string;
   notify: (text: string, error?: boolean) => void;
   onOpenSettings: () => void;
 }
 
-export default function ProjectsPage({ categories, notify, onOpenSettings }: Props) {
+export default function ProjectsPage({ categories, novaVersion, notify, onOpenSettings }: Props) {
   const [items, setItems] = useState<ProjectSummary[]>([]);
   const [folder, setFolder] = useState("");
   const [folderExists, setFolderExists] = useState(true);
@@ -64,16 +65,14 @@ export default function ProjectsPage({ categories, notify, onOpenSettings }: Pro
             <div>
               <div className="eyebrow">Projektübersicht</div>
               <h1>Deine Projekte</h1>
-              <p>Pläne verwalten. Symbole zuordnen. Legenden erstellen.</p>
+              <p className="project-summary" aria-label="Projektübersicht in Zahlen">
+                <span><strong>{items.length}</strong> Projekte</span>
+                <span><strong>{items.filter((p) => p.use_as_template !== false).length}</strong> als Vorlage verfügbar</span>
+              </p>
             </div>
             <button className="btn primary" onClick={() => setDialog(true)}>
               <Icon name="plus" size={18} /> Legende erstellen
             </button>
-        </div>
-
-        <div className="project-metrics" aria-label="Projektübersicht in Zahlen">
-          <div><span>Projekte</span><strong>{items.length}</strong><Icon name="projects" size={22} /></div>
-          <div><span>Als Vorlage verfügbar</span><strong>{items.filter((p) => p.use_as_template !== false).length}</strong><Icon name="library" size={22} /></div>
         </div>
 
         {items.length === 0 ? (
@@ -152,6 +151,7 @@ export default function ProjectsPage({ categories, notify, onOpenSettings }: Pro
       {dialog && (
         <CreateDialog
           projects={items}
+          novaVersion={novaVersion}
           notify={notify}
           onClose={() => setDialog(false)}
           onDone={(id) => {
@@ -167,11 +167,13 @@ export default function ProjectsPage({ categories, notify, onOpenSettings }: Pro
 
 function CreateDialog({
   projects,
+  novaVersion,
   notify,
   onClose,
   onDone,
 }: {
   projects: ProjectSummary[];
+  novaVersion: string;
   notify: (text: string, error?: boolean) => void;
   onClose: () => void;
   onDone: (id: string) => void;
@@ -180,7 +182,7 @@ function CreateDialog({
   const [existing, setExisting] = useState(projects[0]?.id ?? "");
   const [number, setNumber] = useState("");
   const [name, setName] = useState("");
-  const [nova, setNova] = useState("19.2");
+  const [nova, setNova] = useState(novaVersion);
   const [template, setTemplate] = useState("");
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
