@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, CompanyLegend, GeneralInfo } from "../api";
 import GeneralPartEditor from "./GeneralPartEditor";
+import Desc from "./Desc";
 
 /** Legende Allgemein (the drawing) and, separate from it, everything an admin sets. */
 export default function CompanyLegendCard({
@@ -55,11 +56,7 @@ export default function CompanyLegendCard({
     <>
       <div className="card">
         <h3>Legende Allgemein</h3>
-        <p className="desc">
-          Die Zeichnung steht unter dem Titel, in demselben Raster wie der Rest der Legende: dieselbe Schriftgrösse,
-          dieselbe Symbolgrösse, dieselben Abstände und dieselbe Spaltenzahl. Die stellst du im Legendeneditor ein.
-          Den Pfad trägt die Firma selbst ein. Nur Admins ändern Pfad und Zeilen.
-        </p>
+        <Desc short="Steht unter dem Titel, im selben Raster wie die Legende." more="Dieselbe Schriftgrösse, dieselbe Symbolgrösse, dieselben Abstände und dieselbe Spaltenzahl. Die stellst du im Legendeneditor ein. Den Pfad trägt die Firma selbst ein. Nur Admins ändern Pfad und Zeilen." />
 
         <label className="field">
           <span>Datei oder Ordner (DXF, DWG oder Ordner eines Vorlagen-Projekts)</span>

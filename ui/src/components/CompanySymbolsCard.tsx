@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { CompanySymbolItem } from "../api";
+import Desc from "./Desc";
 
 /** All company symbols: how a symbol appears in every legend (text, section, size, turn,
  *  combined symbols). They are saved in the legend editor with «Als Firmensymbol speichern». */
@@ -35,11 +36,7 @@ export default function CompanySymbolsCard({ notify }: { notify: (text: string, 
   return (
     <div className="card">
       <h3>Firmensymbole</h3>
-      <p className="desc">
-        So erscheint ein Symbol in jeder neuen Legende: Text, Abschnitt, Grösse, Drehung, Spiegeln und kombinierte Symbole. Du speicherst
-        ein Firmensymbol im Legendeneditor beim Symbol mit «Als Firmensymbol speichern». Die Farbe kommt weiter aus dem Plan.
-        Bestehende Legenden ändern sich erst, wenn du einen neuen Vorschlag machst.
-      </p>
+      <Desc short="Wie ein Symbol in jeder neuen Legende erscheint." more="Text, Abschnitt, Grösse, Drehung, Spiegeln und kombinierte Symbole. Du speicherst ein Firmensymbol im Legendeneditor beim Symbol mit «Als Firmensymbol speichern». Die Farbe kommt weiter aus dem Plan. Bestehende Legenden ändern sich erst, wenn du einen neuen Vorschlag machst." />
       {items && items.length > 0 && (
         <input className="input" style={{ margin: "8px 0", maxWidth: 360 }} placeholder="Suchen" value={query}
           onChange={(e) => setQuery(e.target.value)} aria-label="Firmensymbole suchen" />

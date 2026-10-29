@@ -6,6 +6,7 @@ import { api, DATASET_LABEL, StencilData, Status, UpdateInfo } from "../api";
 import { TrashIcon } from "./Icons";
 import InfoTip from "./InfoTip";
 import type { ThemeMode } from "../theme";
+import Desc from "./Desc";
 
 interface Props {
   status: Status;
@@ -162,11 +163,7 @@ export default function SettingsPage({ status, update, onCheckUpdate, onShowUpda
 
         <div className="card">
           <h3>Nova-Datensätze</h3>
-          <p className="desc">
-            Die Symbole stammen aus den Nova-Elektro-Datensätzen (.nzp). «Automatisch suchen» sucht in
-            C:\Users\Public\Documents\Trimble\Warehouse und übernimmt nur Elektro-Datensätze mit Symbolen.
-            Einzelne Dateien fügst du unten ein: im Explorer Shift + Rechtsklick → «Als Pfad kopieren».
-          </p>
+          <Desc short="Die Symbole stammen aus den Nova-Elektro-Datensätzen (.nzp)." more="«Automatisch suchen» sucht in C:\Users\Public\Documents\Trimble\Warehouse und übernimmt nur Elektro-Datensätze mit Symbolen. Einzelne Dateien fügst du unten ein: im Explorer Shift + Rechtsklick → «Als Pfad kopieren»." />
           <div className="path-list">
             {paths.length === 0 && <div className="hint">Noch kein Datensatz eingetragen.</div>}
             {paths.map((p) => {
@@ -260,10 +257,7 @@ export default function SettingsPage({ status, update, onCheckUpdate, onShowUpda
 
         <div className="card">
           <h3>Projektordner</h3>
-          <p className="desc">
-            Hier legt das Programm pro Projekt einen Ordner an (Projektdatei, importierte Pläne, später die Legenden).
-            Alle Mitarbeitenden tragen denselben Ordner ein. Der Ordner ist nicht fest im Programm: jede Firma trägt ihren eigenen ein.
-          </p>
+          <Desc short="Hier legt das Programm pro Projekt einen Ordner an (Projektdatei, importierte Pläne, später die Legenden)." more="Alle Mitarbeitenden tragen denselben Ordner ein. Der Ordner ist nicht fest im Programm: jede Firma trägt ihren eigenen ein." />
           <div className="row">
             <input
               className="input"
@@ -302,10 +296,7 @@ export default function SettingsPage({ status, update, onCheckUpdate, onShowUpda
 
       <div className="card">
         <h3>Firmenordner</h3>
-        <p className="desc">
-            Hier liegen die gemeinsamen Kategorien, Zuordnungen und Firmentexte. Alle Mitarbeitenden tragen denselben Ordner ein.
-            Ohne Eintrag speichert das Programm nur auf diesem Computer. Der Ordner ist nicht fest im Programm.
-        </p>
+        <Desc short="Hier liegen die gemeinsamen Kategorien, Zuordnungen und Firmentexte." more="Alle Mitarbeitenden tragen denselben Ordner ein. Ohne Eintrag speichert das Programm nur auf diesem Computer. Der Ordner ist nicht fest im Programm." />
           <div className="row">
             <input
               className="input"
@@ -369,11 +360,7 @@ export default function SettingsPage({ status, update, onCheckUpdate, onShowUpda
 
         <div className="card">
           <h3>Nova-Version (Standard für neue Projekte)</h3>
-          <p className="desc">
-            Nova-Programmversion, zum Beispiel 19.2 oder 20. Jedes Projekt speichert seine eigene Angabe. Die Angabe ist
-            eine Information zum Projekt: Der Import liest heute alle Pläne gleich und prüft die Nova-Version nicht.
-            Geprüft ist das Programm mit Nova 19.2 Patch 3, Nova 20 noch nicht.
-          </p>
+          <Desc short="Nova-Version für neue Projekte, z. B. 19.2 oder 20." more="Jedes Projekt speichert seine eigene Angabe. Die Angabe ist eine Information zum Projekt: Der Import liest heute alle Pläne gleich und prüft die Nova-Version nicht. Geprüft ist das Programm mit Nova 19.2 Patch 3, Nova 20 noch nicht." />
           <div className="row">
             <select
               className="select"
@@ -391,10 +378,7 @@ export default function SettingsPage({ status, update, onCheckUpdate, onShowUpda
 
         <div className="card">
           <h3>DWG-Unterstützung (ODA File Converter)</h3>
-          <p className="desc">
-            Nur für DWG-Dateien nötig. DXF, N4D und N4M funktionieren ohne. Der Converter ist kostenlos und wird separat von
-            der Open Design Alliance installiert.
-          </p>
+          <Desc short="Nur für DWG-Dateien nötig." more="DXF, N4D und N4M funktionieren ohne. Der Converter ist kostenlos und wird separat von der Open Design Alliance installiert." />
           {status.oda ? (
             <p>
               <span className="badge manual">gefunden</span> {status.oda}

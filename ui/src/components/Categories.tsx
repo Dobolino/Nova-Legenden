@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, Category, FamilyItem, Options } from "../api";
 import { CategoryDraft, draftOf, draftPatch, isDirty } from "../uiState";
 import { useNavigation, useUnsavedDraft } from "../Navigation";
+import Desc from "./Desc";
 
 interface Props {
   categories: Category[];
@@ -141,11 +142,7 @@ export default function Categories({ categories, options, notify, onChanged }: P
         <div className="split">
           <div className="card">
             <h3>Kategorien der Firma</h3>
-            <p className="desc">
-              Zeile anklicken zum Bearbeiten. Reihenfolge: am Griff ⠿ ziehen oder im Bearbeitungsbereich mit «Nach
-              oben» und «Nach unten». Nummernkreise ordnen Symbole automatisch zu (z. B. 230, 240 für
-              Brandmeldeanlage).
-            </p>
+            <Desc short="Zeile anklicken zum Bearbeiten." more="Reihenfolge: am Griff ⠿ ziehen oder im Bearbeitungsbereich mit «Nach oben» und «Nach unten». Nummernkreise ordnen Symbole automatisch zu (z. B. 230, 240 für Brandmeldeanlage)." />
             <div className="table-scroll">
               <table className="cat-table">
                 <colgroup>
@@ -515,10 +512,7 @@ function UnassignedCard({ categories, notify, onChanged }: {
   return (
     <div className="card">
       <h3>Nicht zugeordnet {items ? <span className="badge">{items.length}</span> : null}</h3>
-      <p className="desc">
-        Symbole, die kein Nummernkreis und keine Namensregel einordnet. In der Legende landen sie in «Diverse».
-        Ordne sie einmal einem Abschnitt oder einer Gruppe zu, dann gilt das in allen Projekten.
-      </p>
+      <Desc short="Symbole, die kein Nummernkreis und keine Namensregel einordnet." more="In der Legende landen sie in «Diverse». Ordne sie einmal einem Abschnitt oder einer Gruppe zu, dann gilt das in allen Projekten." />
       {items && !items.length && <p className="hint">Alle Symbole sind zugeordnet.</p>}
       {items && items.length > 0 && (
         <div className="table-scroll" style={{ maxHeight: 360 }}>

@@ -125,9 +125,9 @@ const PANE_LIMITS = { outline: [180, 520], props: [240, 560] } as const;
 function readPanes(): { outline: number; props: number } {
   try {
     const v = JSON.parse(window.localStorage.getItem(PANE_KEY) || "{}");
-    return { outline: Number(v.outline) || 240, props: Number(v.props) || 280 };
+    return { outline: Number(v.outline) || 210, props: Number(v.props) || 280 };
   } catch {
-    return { outline: 240, props: 280 };
+    return { outline: 210, props: 280 };
   }
 }
 
@@ -201,6 +201,14 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
   }
   const [detached, setDetached] = useState(false);
   const [windowed, setWindowed] = useState(false);
+  // sections opened in the list on the left (one line per section until opened)
+  const [openBlocks, setOpenBlocks] = useState<Set<string>>(() => new Set());
+  const toggleOpen = (id: string) => setOpenBlocks((cur) => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
   const [bar, setBar] = useState<Set<string>>(readBarPref);
   const saveBar = (next: Set<string>) => {
     setBar(next);
@@ -795,6 +803,13 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
     setZoom(Math.max(0.5, Math.min(12, round(width / W))));
   }
 
+  const generalOpen = openBlocks.has("__general__") || sel?.type === "general-row";
+
+  /** A section is open in the list when opened by hand or when it holds the selected entry. */
+  function isOpen(b: LegendBlock): boolean {
+    return openBlocks.has(b.id) || (sel?.type === "item" && sel.block === b.id);
+  }
+
   function toggleGrid() {
     const next = !showGrid;
     setShowGrid(next);
@@ -913,7 +928,7 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
                 if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
               }}
               aria-label="Rastermass"
-              title="Standard behält das Kachelmass aus der Schriftgrösse. Die anderen Stufen setzen Zeilenhöhe und Textabstand. Benutzerdefiniert übernimmt die beiden Millimeterfelder."
+              title="Zeilenhöhe / Textabstand in mm"
             >
               {info.grids.map((g) => (
                 <option key={g.id} value={g.id}>
@@ -1015,7 +1030,7 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
                   if (g) setStyle({ grid: g.id, row: g.row, text_offset: g.text_offset });
                 }}
                 aria-label="Rastermass"
-                title="Standard behält das Kachelmass aus der Schriftgrösse. Die anderen Stufen setzen Zeilenhöhe und Textabstand. Benutzerdefiniert übernimmt die beiden Millimeterfelder."
+                title="Zeilenhöhe / Textabstand in mm"
               >
                 {info.grids.map((g) => (
                   <option key={g.id} value={g.id}>
@@ -1082,15 +1097,18 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
           <div className="section" style={{ marginTop: 0 }}>
             Abschnitte
           </div>
-          {general?.kind && (
+          {general?.kind && doc.general_on !== false && (
             <div className="outline-block">
               <div className={`outline-row ${sel?.type === "general" ? "active" : ""}`}>
-                <span className="swatch" style={{ background: doc.general_section?.header || "#1c7ed6", width: 12, height: 12 }} />
-                <button className="outline-title" onClick={() => setSel({ type: "general" })} title="Kategorie des Allgemeinteils">
-                  {doc.general_section?.title || "Allgemein"} <span className="hint">{general.rows?.length ?? ""}</span>
+                <button className="fold-btn" aria-label={generalOpen ? "Einklappen" : "Aufklappen"} aria-expanded={generalOpen}
+                  onClick={() => toggleOpen("__general__")}>{generalOpen ? "▾" : "▸"}</button>
+                <span className="swatch" style={{ background: doc.general_section?.header || "#808080", width: 12, height: 12 }} />
+                <button className="outline-title" onClick={() => { setSel({ type: "general" }); toggleOpen("__general__"); }} title="Kategorie des Allgemeinteils">
+                  <span className="outline-text">{doc.general_section?.title || "Allgemein"}</span>
+                  <span className="outline-count">{general.rows?.length ?? ""}</span>
                 </button>
               </div>
-              {general.rows?.map((row) => (
+              {generalOpen && general.rows?.map((row) => (
                 <button
                   key={row.id}
                   className={`outline-item ${sel?.type === "general-row" && sel.id === row.id ? "active" : ""}`}
@@ -1113,15 +1131,16 @@ export default function LegendEditor({ projectId, data, categories, notify, lege
                 className={`outline-row ${sel?.type === "block" && sel.block === b.id ? "active" : ""} ${dropAt?.block === b.id && dropAt.before === null ? "drop-end" : ""}`}
                 {...dropProps({ block: b.id, before: null })}
               >
-                <button className="fold-btn" aria-label={b.collapsed ? "Aufklappen" : "Einklappen"} onClick={() => change(updateBlock(doc, b.id, { collapsed: !b.collapsed }))}>
-                  {b.collapsed ? "▸" : "▾"}
+                <button className="fold-btn" aria-label={isOpen(b) ? "Einklappen" : "Aufklappen"} aria-expanded={isOpen(b)} onClick={() => toggleOpen(b.id)}>
+                  {isOpen(b) ? "▾" : "▸"}
                 </button>
                 <span className="swatch" style={{ background: b.style.header, width: 12, height: 12 }} />
-                <button className="outline-title" onClick={() => setSel({ type: "block", block: b.id })} title={b.title}>
-                  {b.title || "(ohne Überschrift)"} <span className="hint">{b.items.filter((it) => !it.hidden && it.kind !== "gap").length}</span>
+                <button className="outline-title" onClick={() => { setSel({ type: "block", block: b.id }); toggleOpen(b.id); }} title={b.title}>
+                  <span className="outline-text">{b.title || "(ohne Überschrift)"}</span>
+                  <span className="outline-count">{b.items.filter((it) => !it.hidden && it.kind !== "gap").length}</span>
                 </button>
               </div>
-              {!b.collapsed &&
+              {isOpen(b) &&
                 b.items.filter((it) => it.kind !== "gap").map((it) => (
                   <button
                     key={it.id}
@@ -2041,7 +2060,7 @@ function ItemProps({
               Farbe von Abschnitt übernehmen
             </button>
             {item.symbol_color && (
-              <button className="btn small" onClick={() => set({ symbol_color: "" })} title="Wieder die automatische Farbe: eigene Farben bleiben, Schwarz und Grau folgen dem Abschnitt">
+              <button className="btn small" onClick={() => set({ symbol_color: "" })} title="Zurück zur automatischen Farbe">
                 Automatisch
               </button>
             )}

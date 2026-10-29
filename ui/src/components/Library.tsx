@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Category, DATASET_LABEL, DatasetInfo, FamilyItem, Options } from "../api";
 import FamilyDetail from "./FamilyDetail";
 import SymbolPic from "./SymbolPic";
+import Desc from "./Desc";
 
 interface Props {
   categories: Category[];
@@ -119,10 +120,7 @@ export default function Library(props: Props) {
         <div className="page-inner">
           <div className="card">
             <h3>Keine Nova-Datensätze gefunden</h3>
-            <p className="desc">
-              Das Programm hat die Datei «Elektroinstallationen…nzp» nicht automatisch gefunden. Gib den Pfad in
-              den Einstellungen an.
-            </p>
+            <Desc short="Das Programm hat die Datei «Elektroinstallationen…nzp» nicht automatisch gefunden." more="Gib den Pfad in den Einstellungen an." />
             <button className="btn primary" onClick={props.onOpenSettings}>
               Zu den Einstellungen
             </button>

@@ -143,6 +143,8 @@ def test_the_toolbar_shows_what_this_computer_chose(editor):
 
 def test_a_symbol_can_take_the_section_colour(editor):
     page, _field, client, ids = editor
+    # sections start closed in the list: open the first one
+    page.locator(".outline-block .outline-title").filter(has_not_text="Allgemein").first.click()
     item = page.locator("button.outline-item").filter(has_not_text="T Titel").first
     playwright.expect(item).to_be_visible()
     item.click()
@@ -376,6 +378,8 @@ def test_two_entries_are_combined_with_ctrl_click_and_split_again(editor):
 
 def test_a_symbol_is_saved_as_company_symbol_from_the_editor(editor):
     page, _field, client, (a, _b) = editor
+    # sections start closed in the list: open the first one
+    page.locator(".outline-block .outline-title").filter(has_not_text="Allgemein").first.click()
     item = page.locator("button.outline-item").filter(has_not_text="T Titel").first
     playwright.expect(item).to_be_visible()
     item.click()
@@ -620,3 +624,15 @@ def test_editor_space_and_view_options_do_not_change_the_exported_document(edito
     import ezdxf
     assert len(ezdxf.readfile(downloaded.value.path()).modelspace()) > 0
     assert client.get(f"/api/projects/{a}/legend").json()["legend"]["doc"] == before
+
+
+def test_the_list_shows_one_line_per_section_until_opened(editor):
+    page, _field, _client, _ids = editor
+    block = page.locator(".outline-block").filter(has_not_text="Allgemein").first
+    title = block.locator(".outline-title")
+    playwright.expect(title).to_be_visible()
+    playwright.expect(block.locator("button.outline-item")).to_have_count(0)
+    title.click()
+    playwright.expect(block.locator("button.outline-item").first).to_be_visible()
+    count = int(title.locator(".outline-count").inner_text())
+    playwright.expect(block.locator("button.outline-item")).to_have_count(count)

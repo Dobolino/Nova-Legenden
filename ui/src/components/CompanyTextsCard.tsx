@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { CompanyText } from "../api";
+import Desc from "./Desc";
 
 /** All company legend texts: which symbol, which text, who saved it. Editable, exportable for Excel. */
 export default function CompanyTextsCard({ notify }: { notify: (text: string, error?: boolean) => void }) {
@@ -86,10 +87,7 @@ export default function CompanyTextsCard({ notify }: { notify: (text: string, er
   return (
     <div className="card">
       <h3>Firmentexte</h3>
-      <p className="desc">
-        Ein Firmentext ersetzt in jeder neuen Legende den Namen aus der Schablone. Er gilt für die ganze Symbolfamilie, egal ob das Programm
-        den Apparat über den Katalogcode oder den Namen erkennt. Die Datei liegt im Firmenordner, den du oben einträgst, zusammen mit den Kategorien und Zuordnungen.
-      </p>
+      <Desc short="Ein Firmentext ersetzt in jeder neuen Legende den Namen aus der Schablone." more="Er gilt für die ganze Symbolfamilie, egal ob das Programm den Apparat über den Katalogcode oder den Namen erkennt. Die Datei liegt im Firmenordner, den du oben einträgst, zusammen mit den Kategorien und Zuordnungen." />
       {file && <p className="hint" style={{ wordBreak: "break-all" }}>Datei: {file}</p>}
       <div className="row" style={{ gap: 8, margin: "8px 0" }}>
         <input className="input" style={{ flex: 1, minWidth: 200 }} placeholder="Suchen" value={query} onChange={(e) => setQuery(e.target.value)} aria-label="Firmentexte suchen" />

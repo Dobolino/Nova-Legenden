@@ -1044,3 +1044,15 @@ img.sym-icon { object-fit: contain; }
 .legend-workspace-head .btn, .legend-workspace-head .select { min-height: 30px; }
 /* the save state must not change the width of the toolbar (it would wrap and move the sheet) */
 .legend-toolbar > [role="status"] { display: inline-block; min-width: 96px; text-align: right; white-space: nowrap; }
+
+/* list on the left: one line per section, the count at the right edge */
+.legend-outline .outline-title { display: flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1; text-align: left; }
+.legend-outline .outline-title .outline-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend-outline .outline-count { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.legend-outline .outline-row { padding-top: 1px; padding-bottom: 1px; }
+.legend-outline .outline-block { margin-bottom: 2px; }
+.legend-outline .outline-row { margin-top: 0; padding: 0; }
+.legend-outline .outline-title { padding: 3px 2px; font-size: 13px; font-weight: 500; }
+.legend-outline .outline-block { margin-bottom: 0; }
+.legend-outline .outline-block + .outline-block, .legend-outline .outline-item + .outline-block { margin-top: 1px; }
+.legend-outline .fold-btn { width: 16px; font-size: 11px; }

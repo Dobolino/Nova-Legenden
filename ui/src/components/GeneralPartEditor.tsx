@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
 import type { CompanyGeneral, FamilyItem, GeneralRow, SymbolRender } from "../api";
+import Desc from "./Desc";
 
 /** Settings: the rows of the general part. The drawing on the server stays the source;
  *  text changes, hidden rows and linked symbols are kept beside it for the whole company. */
@@ -162,13 +163,7 @@ export default function GeneralPartEditor({ notify, reloadKey = 0 }: { notify: (
   return (
     <div className="general-editor">
       <h4>Zeilen der Legende Allgemein</h4>
-      <p className="desc">
-        Die Zeichnung oben bleibt die Quelle. Hier änderst du Texte, blendest Zeilen aus und verknüpfst Zeilen mit Symbolen:
-        Verknüpfte Symbole erscheinen in den Projektabschnitten nicht noch einmal. Schriftgrösse, Symbolgrösse, Abstand und
-        Spalten übernimmt der Allgemeinteil vom Legendeneditor, damit er wie der Rest der Legende aussieht. Mit ↑ ↓ änderst du
-        die Reihenfolge, mit «+ Zeile aus Bibliothek» nimmst du ein Nova-Symbol auf. «Als Vorlage» exportiert die Zeichnung mit
-        allen Änderungen und dem Hilfsraster: in Nova bearbeiten, auf dem Server ablegen, «Neu laden».
-      </p>
+      <Desc short="Die Zeichnung oben bleibt die Quelle." more="Hier änderst du Texte, blendest Zeilen aus und verknüpfst Zeilen mit Symbolen: Verknüpfte Symbole erscheinen in den Projektabschnitten nicht noch einmal. Schriftgrösse, Symbolgrösse, Abstand und Spalten übernimmt der Allgemeinteil vom Legendeneditor, damit er wie der Rest der Legende aussieht. Mit ↑ ↓ änderst du die Reihenfolge, mit «+ Zeile aus Bibliothek» nimmst du ein Nova-Symbol auf. «Als Vorlage» exportiert die Zeichnung mit allen Änderungen und dem Hilfsraster: in Nova bearbeiten, auf dem Server ablegen, «Neu laden»." />
       <div className="row" style={{ gap: 8, alignItems: "center" }}>
         <span className="hint" style={{ flex: 1, wordBreak: "break-all" }}>
           {data.source || "Keine Servervorlage eingestellt."}{stamp ? ` · Datei vom ${stamp}` : ""}
