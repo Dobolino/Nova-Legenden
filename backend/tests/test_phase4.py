@@ -859,7 +859,6 @@ def test_short_colour_codes_are_chips_in_compact_rows(tmp_path):
     """Farbcodes drawn as short filled bars (a block with one SOLID) are colour chips; their
     rows are as high as the text, lower than a symbol row."""
     from nova_legend.legend.general import load
-    from nova_legend.legend.layout import entry_slot, symbol_tile
 
     d = ezdxf.new("R2013", units=4)
     d.header["$INSUNITS"] = 4
@@ -882,10 +881,35 @@ def test_short_colour_codes_are_chips_in_compact_rows(tmp_path):
     doc = normalize({"style": {"text_size": 2.5}, "blocks": []})
     lay = layout(doc, {}, part.info())
     chips = sorted((p for p in lay["prims"] if p.get("role") == "swatch"), key=lambda p: (p["x"], p["y"]))
-    pitch = chips[1]["y"] - chips[0]["y"]
-    assert chips[0]["x"] == chips[1]["x"]
-    assert pitch < entry_slot(doc["style"], symbol_tile(doc["style"])) - 0.5   # lower than a symbol row
-    assert all(c["h"] < pitch for c in chips)                 # a gap between the chips
+    pair = [(a, b) for a, b in zip(chips, chips[1:]) if a["x"] == b["x"]]
+    assert pair
+    pitch = pair[0][1]["y"] - pair[0][0]["y"]
+    grid = next(p for p in lay["prims"] if p["t"] == "grid" and p.get("block") == "general")
+    assert pitch == pytest.approx(grid["row"] / 2, abs=0.01)   # two colour codes per grid row
+    assert all(c["h"] < pitch for c in chips)                  # a gap between the chips
+
+
+def test_text_without_symbol_in_a_grid_template_is_a_heading(tmp_path):
+    """In a template with NL_RASTER a text in the text column without symbol is a heading."""
+    from nova_legend.legend.general import load
+
+    d = ezdxf.new("R2013", units=4)
+    d.header["$INSUNITS"] = 4
+    d.layers.add("NL_RASTER")
+    msp = d.modelspace()
+    for k in range(5):
+        msp.add_line((0, k * 4.55), (100, k * 4.55), dxfattribs={"layer": "NL_RASTER"})
+    names = ["Farbcodes", "Dose", "Leitung", "Kasten"]
+    for k, name in enumerate(reversed(names)):
+        y = k * 4.55
+        msp.add_text(name, height=2.0).set_placement((25, y + 1.3))
+        if name != "Farbcodes":
+            msp.add_circle((10, y + 2.3), 1.5)
+    path = tmp_path / "vorlage.dxf"
+    d.saveas(path)
+    part = load(str(path), 180, None)
+    assert {r["text"]: r["heading"] for r in part.rows} == {
+        "Farbcodes": True, "Dose": False, "Leitung": False, "Kasten": False}
 
 
 def test_a_colour_bar_becomes_a_chip_and_the_symbol_stays_whole(tmp_path):

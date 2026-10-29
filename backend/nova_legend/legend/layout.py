@@ -398,23 +398,32 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
     room_w = max(side, text_x - 1.2, min(widest + 1.5, colw * 0.45))
     text_x = max(text_x, room_w + 1.2)
     swatch_h = min(tile * 0.3, max(1.0, ts * 0.6))
+    half = (slot - gap) / 2          # two colour codes and their gaps take one grid row
     rows = []
     for r in general["rows"]:
         heading = bool(r.get("heading"))
         size = ts * max(0.5, min(3.0, float(r.get("text_scale") or 1.0)))
         width = colw - 1.6 if heading else colw - text_x - 0.8
         lines = wrap(r["text"], size, width, heading)
-        if r.get("picture") == "swatch" and not heading:
-            # a colour code needs no symbol tile: the row is as high as its text
-            h = max(swatch_h + 1.2, len(lines[:cap] if cap else lines) * size * LINE_FACTOR + TEXT_CLEARANCE)
-            if cap:
-                lines = lines[:cap] or [""]
+        if r.get("picture") == "swatch" and not heading and len(lines) == 1 and half >= max(
+                swatch_h + 0.6, size * LINE_FACTOR + 0.2):
+            # a colour code needs no symbol tile: two of them share one grid cell
+            h = half
         elif cap and not heading:
             lines = lines[:cap] or [""]
             h = slot
         else:
             h = max(slot, len(lines) * size * LINE_FACTOR + TEXT_CLEARANCE)
         rows.append((r, lines, size, h))
+    # an odd run of colour codes fills its last cell, so the next row is on the grid again
+    padded, run = [], 0
+    for i, item in enumerate(rows):
+        padded.append(item)
+        run = run + 1 if item[3] == half else 0
+        after = rows[i + 1][3] if i + 1 < len(rows) else None
+        if run % 2 and after != half:
+            padded.append(({"id": None, "text": "", "spacer": True}, [], 0.0, half))
+    rows = padded
     total = sum(h for *_a, h in rows) + gap * max(0, len(rows) - cols)
     target = total / cols
     columns: list[list] = [[]]
@@ -425,6 +434,8 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
         full = used + h > target + 0.01 and columns[-1] and len(columns) < cols
         heading_last = item[0].get("heading") and nxt and used + h + nxt[3] > target + 0.01 and len(columns) < cols
         if (full or heading_last) and columns[-1]:
+            if item[0].get("spacer"):
+                continue                 # no empty half cell at the top of a column
             columns.append([])
             used = 0.0
         columns[-1].append(item)
@@ -434,6 +445,9 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
         cx = x0 + c * colw
         cy = top
         for i, (r, lines, size, h) in enumerate(chunk):
+            if r.get("spacer"):
+                cy += h + (gap if i < len(chunk) - 1 else 0.0)
+                continue
             mid = cy + h / 2
             shown = lines or [r["text"]]
             row_lh = size * LINE_FACTOR
@@ -480,7 +494,8 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
                     if line_row:
                         # one sample of the stroke, as long as the symbol tile, so the line type
                         # reads next to the symbols of the other sections
-                        length = tile * 0.92
+                        # as long as the other cables of the general part at the common scale
+                        length = min(gw * common, room_w) if dims and gw > 0 else tile * 0.92
                         thick = 0.5
                         w, hgt, scale = length, thick, length / max(gw, 1e-6)
                         prims.append({"t": "grow", "row": r["id"], "x": round(cx + axis - w / 2, 3),
@@ -491,12 +506,13 @@ def _general_rows(general: dict, prims: list, x0: float, top: float, inner: floa
                         # that does not fit the row (height) or the symbol column (width) shrinks
                         view_h = max(slot - 0.4, side)
                         fit = common * factor
-                        fit = min(fit, view_h / max(gh, 1e-6), room_w / max(gw, 1e-6))
+                        room = min(room_w, text_x - 2.5)
+                        fit = min(fit, view_h / max(gh, 1e-6), room / max(gw, 1e-6))
                         w, hgt = gw * fit, gh * fit
-                        # centred on the symbol axis; a wide symbol starts at the cell edge
-                        left = cx + axis - w / 2
-                        if left < cx + 1.5:
-                            left = cx + 1.5         # room to the text of the column on the left
+                        # centred on the symbol axis; a wide symbol keeps 1 mm to its text
+                        # and 1.5 mm to the text of the column on the left
+                        left = min(cx + axis - w / 2, cx + text_x - 1.0 - w)
+                        left = max(left, cx + 1.5)
                         prims.append({"t": "grow", "row": r["id"], "x": round(left, 3),
                                       "y": round(mid - hgt / 2, 3), "w": round(w, 3), "h": round(hgt, 3),
                                       "k": round(fit, 5), "rot": rot})

@@ -595,6 +595,11 @@ def split_rows(doc, to_mm: float, bands: list[float] | None = None) -> tuple[lis
         row["ents"].append((e, box))
         if e.dxftype() == "INSERT":
             row["names"].append(norm_text(block_title(e.dxf.name)))
+    if bands:
+        # in a template with grid a text without symbol is a heading (Farbcodes)
+        for r in rows:
+            if not r["ents"]:
+                r["heading"] = True
     left = min((b.extmin.x for r in rows for _e, b in r["ents"]), default=text_x)
     area = (text_x - left) * to_mm
     out = []
